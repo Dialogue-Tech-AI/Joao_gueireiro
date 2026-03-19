@@ -1,0 +1,210 @@
+# ============================================================
+# Plataforma Guerreiros - VPS Ubuntu (Compose Unificado)
+# ============================================================
+# Sobe dependencias + aplicacao em um unico comando.
+# SSL via Cloudflare Proxy (porta 80 exposta).
+#
+# Uso:
+#   docker compose -f config/vps/docker-compose.vps.yml up -d --build
+#
+# Primeira vez (migrations + seed):
+#   docker compose -f config/vps/docker-compose.vps.yml exec app npm run migration:run
+#   docker compose -f config/vps/docker-compose.vps.yml exec app npm run seed:run
+# ============================================================
+
+services:
+  # ==================== DEPENDENCIAS ====================
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: guerreiros-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: guerreiros
+      POSTGRES_PASSWORD: guerreiros123
+      POSTGRES_DB: guerreiros
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../core/shared/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - guerreiros-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guerreiros -d guerreiros"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: guerreiros-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - guerreiros-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: guerreiros-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guerreiros
+      RABBITMQ_DEFAULT_PASS: guerreiros123
+      RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "15672:15672"  # Management UI (remover em producao)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - guerreiros-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: guerreiros-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: guerreiros
+      MINIO_ROOT_PASSWORD: guerreiros
+    ports:
+      - "9001:9001"  # Console UI (remover em producao)
+    volumes:
+      - minio_data:/data
+    networks:
+      - guerreiros-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: guerreiros-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - guerreiros-network
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Aguardando MinIO...';
+      sleep 15;
+      /usr/bin/mc alias set guerreiros http://minio:9000 guerreiros guerreiros || exit 1;
+      /usr/bin/mc mb --ignore-existing guerreiros/attachments || exit 1;
+      /usr/bin/mc mb --ignore-existing guerreiros/media || exit 1;
+      /usr/bin/mc mb --ignore-existing guerreiros/logs || exit 1;
+      /usr/bin/mc anonymous set download guerreiros/attachments || exit 1;
+      /usr/bin/mc anonymous set download guerreiros/media || exit 1;
+      echo 'MinIO inicializado!';
+      exit 0;
+      "
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: guerreiros-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - guerreiros-network
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f qdrant || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # ==================== APLICACAO ====================
+
+  app:
+    build:
+      context: ../../core/services/backend
+      dockerfile: ../../../config/dockerfiles/backend.Dockerfile
+    container_name: guerreiros-app
+    restart: unless-stopped
+    env_file:
+      - ./credentials/backend.vps.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - guerreiros-network
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+
+  ai-worker:
+    build:
+      context: ../../core/services/ai-worker
+      dockerfile: ../../../config/dockerfiles/ai-worker.Dockerfile
+    container_name: guerreiros-ai-worker
+    restart: unless-stopped
+    env_file:
+      - ./credentials/ai-worker.vps.env
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - guerreiros-network
+
+  frontend:
+    build:
+      context: ../../core/services/frontend
+      dockerfile: ../../../config/dockerfiles/frontend.Dockerfile
+    container_name: guerreiros-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - guerreiros-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+# ==================== VOLUMES ====================
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+  minio_data:
+    driver: local
+  qdrant_data:
+    driver: local
+
+# ==================== REDE ====================
+
+networks:
+  guerreiros-network:
+    driver: bridge

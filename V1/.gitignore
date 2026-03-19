@@ -28,6 +28,7 @@ config/server/credentials/.env
 config/server/credentials/.env
 config/server/credentials/.env
 config/server/credentials/.env
+config/vps/credentials/
 
 # IDEs
 .vscode/
