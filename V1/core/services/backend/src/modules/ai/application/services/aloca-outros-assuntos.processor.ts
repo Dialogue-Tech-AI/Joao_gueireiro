@@ -6,8 +6,7 @@ import { socketService } from '../../../../shared/infrastructure/socket/socket.s
 import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
-const FC_NAME = 'alocaecommerce';
-const INTERVENTION_TYPE = 'encaminhados-ecommerce';
+const INTERVENTION_TYPE = 'outros-assuntos';
 
 function parseResult(resultRaw: string): Record<string, unknown> {
   try {
@@ -19,47 +18,26 @@ function parseResult(resultRaw: string): Record<string, unknown> {
 }
 
 /**
- * Processador específico para alocaecommerce.
- * Quando acionada, move o atendimento para a subdivisão "Não atribuídos" → "Encaminhamentos e-commerce".
- * Adiciona as informações do resumo no interventionData (aparece no card da direita).
+ * Move atendimento para Intervenção Humana > Outros assuntos.
+ * Mantém o atendimento ativo e dispara eventos para atualizar cards/badges/estatísticas.
  */
-export function createAlocaEcommerceProcessor(): FunctionCallProcessorHandler {
+export function createAlocaOutrosAssuntosProcessor(): FunctionCallProcessorHandler {
   const attendanceRepo = AppDataSource.getRepository(Attendance);
 
   return async (payload): Promise<{ output: string | null; data?: Record<string, unknown>; processed: boolean }> => {
-    const { result, attendance_id, client_phone } = payload;
+    const { function_call_name, result, attendance_id, client_phone } = payload;
     const parsed = parseResult(result) as Record<string, unknown>;
     const data = (parsed?.data as Record<string, unknown>) ?? parsed;
 
     try {
       const attendance = await attendanceRepo.findOne({ where: { id: attendance_id } });
       if (!attendance) {
-        logger.error(`${FC_NAME}: attendance não encontrado`, { attendance_id });
+        logger.error(`${function_call_name}: attendance nao encontrado`, { attendance_id });
         return { output: null, data: data as Record<string, unknown>, processed: true };
       }
 
-      // Verificar se já está na subdivisão correta
-      if (attendance.interventionType === INTERVENTION_TYPE) {
-        logger.info(`${FC_NAME}: atendimento já está em Encaminhamentos e-commerce, atualizando apenas interventionData`, {
-          attendance_id,
-          client_phone,
-        });
-      }
-
-      // Preparar interventionData com os dados do resumo
-      const interventionData = { ...(data as Record<string, unknown>), client_phone } as Record<string, unknown>;
-
-      // Atualizar attendance: definir interventionType e interventionData
-      // IMPORTANTE: Não alterar operationalState se já estiver definido (pode estar em TRIAGEM, ABERTO, etc.)
-      // Apenas garantir que não seja FECHADO_OPERACIONAL
-      const updateData: any = {
-        interventionType: INTERVENTION_TYPE,
-        interventionData,
-      };
-
-      // Se o attendance estiver fechado, não fazer nada (não deve aparecer em não atribuídos)
       if (attendance.operationalState === 'FECHADO_OPERACIONAL') {
-        logger.warn(`${FC_NAME}: atendimento está fechado, não será realocado`, {
+        logger.warn(`${function_call_name}: atendimento fechado, realocacao ignorada`, {
           attendance_id,
           client_phone,
           operationalState: attendance.operationalState,
@@ -67,14 +45,18 @@ export function createAlocaEcommerceProcessor(): FunctionCallProcessorHandler {
         return { output: null, data: data as Record<string, unknown>, processed: true };
       }
 
+      const interventionData = { ...(data as Record<string, unknown>), client_phone } as Record<string, unknown>;
+
       await attendanceRepo.update(
         { id: attendance_id },
-        updateData
+        {
+          interventionType: INTERVENTION_TYPE,
+          interventionData,
+        } as any
       );
 
-      // Verificar se o update foi persistido
       const updatedAttendance = await attendanceRepo.findOne({ where: { id: attendance_id } });
-      logger.info(`${FC_NAME}: atendimento movido para Encaminhamentos e-commerce`, {
+      logger.info(`${function_call_name}: atendimento movido para intervencao outros assuntos`, {
         attendance_id,
         client_phone,
         interventionType: updatedAttendance?.interventionType,
@@ -83,7 +65,6 @@ export function createAlocaEcommerceProcessor(): FunctionCallProcessorHandler {
         hasInterventionData: !!updatedAttendance?.interventionData,
       });
 
-      // Emitir eventos para atualizar o frontend em tempo real
       const socketPayload = {
         attendanceId: attendance_id,
         interventionType: INTERVENTION_TYPE,
@@ -94,24 +75,22 @@ export function createAlocaEcommerceProcessor(): FunctionCallProcessorHandler {
         socketService.emitToRoom('supervisors', 'attendance:moved-to-intervention', socketPayload);
         invalidateSubdivisionCountsCache();
         socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
-        logger.info(`${FC_NAME}: attendance:moved-to-intervention emitido via Socket.IO (tempo real)`);
+        if (updatedAttendance?.sellerId) {
+          socketService.emitToRoom(`seller_${updatedAttendance.sellerId}`, 'attendance:moved-to-intervention', socketPayload);
+        }
       } catch (e: any) {
-        logger.error(`${FC_NAME}: erro ao emitir Socket.IO`, { error: e?.message });
+        logger.error(`${function_call_name}: erro ao emitir Socket.IO`, { error: e?.message });
       }
 
       if (redisService.isConnected()) {
         try {
-          await redisService.publish(
-            'attendance:intervention-assigned',
-            JSON.stringify(socketPayload)
-          );
-          logger.info(`${FC_NAME}: evento publicado no Redis`);
+          await redisService.publish('attendance:intervention-assigned', JSON.stringify(socketPayload));
         } catch (e: any) {
-          logger.error(`${FC_NAME}: erro ao publicar Redis`, { error: e?.message });
+          logger.error(`${function_call_name}: erro ao publicar Redis`, { error: e?.message });
         }
       }
     } catch (err: any) {
-      logger.error(`${FC_NAME}: erro ao mover atendimento para Encaminhamentos e-commerce`, {
+      logger.error(`${function_call_name}: erro ao mover para outros assuntos`, {
         error: err?.message,
         attendance_id,
         client_phone,

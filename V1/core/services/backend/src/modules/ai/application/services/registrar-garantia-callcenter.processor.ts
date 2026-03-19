@@ -5,6 +5,7 @@ import { CaseType } from '../../../attendance/domain/entities/case-type.entity';
 import { CaseStatus } from '../../../../shared/types/common.types';
 import { logger } from '../../../../shared/utils/logger';
 import { redisService } from '../../../../shared/infrastructure/redis/redis.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 import { canCreateNewCase } from './case-creation.utils';
@@ -76,6 +77,8 @@ export function createRegistrarGarantiaCallCenterProcessor(): FunctionCallProces
 
       try {
         socketService.emitToRoom('supervisors', 'attendance:moved-to-intervention', eventPayload);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         logger.info(`${FC_NAME}: attendance:moved-to-intervention emitido via Socket.IO (tempo real)`);
       } catch (e: any) {
         logger.error(`${FC_NAME}: erro ao emitir Socket.IO`, { error: e?.message });

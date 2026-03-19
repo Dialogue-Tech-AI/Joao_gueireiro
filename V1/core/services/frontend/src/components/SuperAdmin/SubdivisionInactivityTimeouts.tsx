@@ -86,51 +86,6 @@ export const SubdivisionInactivityTimeouts: React.FC<SubdivisionInactivityTimeou
               </div>
             </div>
 
-            {/* Intervenção Humana */}
-            <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-4" style={{ backgroundColor: '#F8FAFC' }}>
-              <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3" style={{ color: '#475569' }}>
-                Intervenção Humana
-              </h4>
-              <div className="space-y-3">
-                {['garantia', 'troca', 'estorno'].map((subdivision) => {
-                  const label = subdivision === 'garantia'
-                    ? 'Garantia'
-                    : subdivision === 'troca'
-                    ? 'Troca'
-                    : 'Estorno';
-
-                  return (
-                    <div key={subdivision} className="flex items-center justify-between gap-4">
-                      <label className="text-sm text-slate-700 dark:text-slate-300 flex-1" style={{ color: '#475569' }}>
-                        {label}
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          min="1"
-                          max="1440"
-                          value={subdivisionInactivityTimeouts[subdivision] || ''}
-                          onChange={(e) => {
-                            const value = e.target.value === '' ? undefined : Math.min(1440, Math.max(1, parseInt(e.target.value, 10) || 0));
-                            setSubdivisionInactivityTimeouts({
-                              ...subdivisionInactivityTimeouts,
-                              [subdivision]: value,
-                            });
-                          }}
-                          placeholder="Desativado"
-                          className="w-24 px-3 py-1.5 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-primary outline-none"
-                          style={{ backgroundColor: '#FFFFFF', color: '#0F172A' }}
-                        />
-                        <span className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" style={{ color: '#64748B' }}>
-                          min
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
             <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
               <div className="flex items-start gap-2">
                 <span className="material-icons-outlined text-blue-600 dark:text-blue-400 text-lg">info</span>

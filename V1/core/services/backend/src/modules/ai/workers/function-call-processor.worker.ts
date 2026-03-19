@@ -22,6 +22,8 @@ import { createRecuperarAtendimentoProcessor } from '../application/services/rec
 import { createRoteiamarcaProcessor } from '../application/services/roteiamarca.processor';
 import { createAlocaGerentesProcessor } from '../application/services/aloca-gerentes.processor';
 import { createEnviaCasosGerentesProcessor } from '../application/services/envia-casos-gerentes.processor';
+import { createAlocaProteseCapilarProcessor } from '../application/services/aloca-protese-capilar.processor';
+import { createAlocaOutrosAssuntosProcessor } from '../application/services/aloca-outros-assuntos.processor';
 import { FunctionCallConfigService } from '../application/services/function-call-config.service';
 import { ProcessExecutionService } from '../application/services/process-execution.service';
 import type { FunctionCallProcessorHandler } from '../domain/interfaces/function-call-processor.interface';
@@ -66,12 +68,27 @@ export class FunctionCallProcessorWorker {
       this.registerProcessor('fechaatendimentobalcao', createFechaAtendimentoBalcaoProcessor());
       this.registerProcessor('alocaecommerce', createAlocaEcommerceProcessor());
       this.registerProcessor('alocabalcao', createAlocaBalcaoProcessor());
-      this.registerProcessor('alocafixo', createAlocaFixoProcessor());
+      const alocaFixoProcessor = createAlocaFixoProcessor();
+      this.registerProcessor('alocafixo', alocaFixoProcessor);
+      this.registerProcessor('aloca-fixo', alocaFixoProcessor);
+      this.registerProcessor('manutencao', alocaFixoProcessor);
+      this.registerProcessor('alocamanutencao', alocaFixoProcessor);
+      this.registerProcessor('aloca-manutencao', alocaFixoProcessor);
       this.registerProcessor('enviaecommerce', createEnviaEcommerceProcessor());
       this.registerProcessor('recuperaratendimento', createRecuperarAtendimentoProcessor());
       this.registerProcessor('roteiamarca', createRoteiamarcaProcessor());
       this.registerProcessor('alocagerentes', createAlocaGerentesProcessor());
       this.registerProcessor('enviacasosgerentes', createEnviaCasosGerentesProcessor());
+      const alocaOutrosAssuntosProcessor = createAlocaOutrosAssuntosProcessor();
+      this.registerProcessor('outrosassuntos', alocaOutrosAssuntosProcessor);
+      this.registerProcessor('outros-assuntos', alocaOutrosAssuntosProcessor);
+      this.registerProcessor('alocaoutrosassuntos', alocaOutrosAssuntosProcessor);
+      this.registerProcessor('aloca-outros-assuntos', alocaOutrosAssuntosProcessor);
+      const alocaProteseCapilarProcessor = createAlocaProteseCapilarProcessor();
+      this.registerProcessor('alocaprotesecapilar', alocaProteseCapilarProcessor);
+      this.registerProcessor('aloca-protese-capilar', alocaProteseCapilarProcessor);
+      this.registerProcessor('protesecapilar', alocaProteseCapilarProcessor);
+      this.registerProcessor('protese-capilar', alocaProteseCapilarProcessor);
 
       await this.queueService.assertQueue(this.queueProcess);
       await this.queueService.assertQueue(this.queueResponse);
@@ -89,7 +106,26 @@ export class FunctionCallProcessorWorker {
             correlationId,
           });
 
-          const handler = this.processors.get(functionCallName) ?? this.defaultProcessor.bind(this);
+          // Fallback inteligente para FCs customizadas de roteamento humano
+          const normalizedFc = functionCallName.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const dynamicProteseHandler =
+            normalizedFc.includes('protese') && normalizedFc.includes('capilar')
+              ? createAlocaProteseCapilarProcessor()
+              : null;
+          const dynamicManutencaoHandler =
+            normalizedFc.includes('manutencao')
+              ? createAlocaFixoProcessor()
+              : null;
+          const dynamicOutrosHandler =
+            normalizedFc.includes('outros') && normalizedFc.includes('assuntos')
+              ? createAlocaOutrosAssuntosProcessor()
+              : null;
+          const handler =
+            this.processors.get(functionCallName) ??
+            dynamicProteseHandler ??
+            dynamicManutencaoHandler ??
+            dynamicOutrosHandler ??
+            this.defaultProcessor.bind(this);
           result = await handler({
             function_call_name: functionCallName,
             result: String(payload.result ?? ''),

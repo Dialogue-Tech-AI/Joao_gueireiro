@@ -7,6 +7,7 @@ import { FunctionCallConfigService } from './function-call-config.service';
 import { whatsappManagerService } from '../../../whatsapp/application/services/whatsapp-manager.service';
 import { logger } from '../../../../shared/utils/logger';
 import { redisService } from '../../../../shared/infrastructure/redis/redis.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 import { canCreateNewCase } from './case-creation.utils';
@@ -159,6 +160,8 @@ export function createRegistrarPosVendaEcommerceProcessor(): FunctionCallProcess
 
       try {
         socketService.emitToRoom('supervisors', 'attendance:moved-to-intervention', payload);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         logger.info('registrarposvendaecommerce: attendance:moved-to-intervention emitido via Socket.IO (tempo real)');
       } catch (e: any) {
         logger.error('registrarposvendaecommerce: erro ao emitir Socket.IO', { error: e?.message });

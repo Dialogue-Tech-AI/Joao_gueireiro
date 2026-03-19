@@ -6,7 +6,7 @@ interface TypingIndicatorProps {
 }
 
 export const TypingIndicator: React.FC<TypingIndicatorProps> = ({ 
-  sender = 'Altese Autopeças',
+  sender = 'AI',
   isClient = false 
 }) => {
   return (
@@ -23,7 +23,7 @@ export const TypingIndicator: React.FC<TypingIndicatorProps> = ({
           className="w-9 h-9 bg-navy flex items-center justify-center rounded-full text-[10px] text-white font-medium flex-shrink-0" 
           style={{ backgroundColor: '#003070' }}
         >
-          AL
+          {sender.length >= 2 ? sender.substring(0, 2).toUpperCase() : sender.charAt(0).toUpperCase()}
         </div>
       )}
       <div className={`flex-1 min-w-0 ${isClient ? '' : 'flex flex-col items-end'}`}>

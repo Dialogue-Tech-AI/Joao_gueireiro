@@ -11,11 +11,11 @@ def get_greeting_response() -> Tuple[str, list[str]]:
     Returns:
         Tuple of (full_response, fragments_list)
     """
-    response = "Olá, seja bem-vindo! Sou o assistente virtual da Altese Peças Automotivas. Você está procurando por alguma peça ou deseja outra informação?"
+    response = "Olá, seja bem-vindo! Sou o assistente virtual. Você está procurando por alguma peça ou deseja outra informação?"
     
     fragments = [
         "Olá, seja bem-vindo!",
-        "Sou o assistente virtual da Altese Peças Automotivas.",
+        "Sou o assistente virtual.",
         "Você está procurando por alguma peça ou deseja outra informação?"
     ]
     

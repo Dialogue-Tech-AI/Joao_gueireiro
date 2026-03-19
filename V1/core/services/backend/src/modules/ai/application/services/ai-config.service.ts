@@ -77,7 +77,7 @@ export class AIConfigService {
           value: prompt,
           metadata: {
             version: '1.0',
-            description: 'Prompt base do agente Altese',
+            description: 'Prompt base do agente',
             updatedAt: new Date().toISOString(),
           },
         });

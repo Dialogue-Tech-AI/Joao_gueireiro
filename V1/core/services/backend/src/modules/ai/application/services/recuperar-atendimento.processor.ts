@@ -4,6 +4,7 @@ import { Message } from '../../../message/domain/entities/message.entity';
 import { AttendanceCase } from '../../../attendance/domain/entities/attendance-case.entity';
 import { OperationalState } from '../../../../shared/types/common.types';
 import { logger } from '../../../../shared/utils/logger';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
@@ -186,6 +187,8 @@ export function createRecuperarAtendimentoProcessor(): FunctionCallProcessorHand
 
         // Emitir evento de remoção de "Fechados"
         socketService.emitToRoom('supervisors', 'attendance:removed-from-fechados', eventData);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         
         // Emitir evento de adição na subdivisão apropriada
         if (reopenedAttendance.sellerId) {
@@ -194,6 +197,8 @@ export function createRecuperarAtendimentoProcessor(): FunctionCallProcessorHand
         } else {
           // Se não tinha vendedor, notificar supervisores (aparece em "Não atribuídos")
           socketService.emitToRoom('supervisors', 'attendance:reopened', eventData);
+          invalidateSubdivisionCountsCache();
+          socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         }
 
         logger.info(`${FC_NAME}: eventos Socket.IO emitidos`, {
@@ -287,6 +292,8 @@ export function createRecuperarAtendimentoProcessor(): FunctionCallProcessorHand
               reason: 'Deletado após merge - atendimento vazio',
               mergedInto: closedAttendance.id,
             });
+            invalidateSubdivisionCountsCache();
+            socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
           } catch (e: any) {
             logger.warn(`${FC_NAME}: erro ao emitir evento de remoção do atendimento vazio`, { error: e?.message });
           }
@@ -321,6 +328,8 @@ export function createRecuperarAtendimentoProcessor(): FunctionCallProcessorHand
               reason: 'Merge realizado - atendimento consolidado',
               mergedInto: closedAttendance.id,
             });
+            invalidateSubdivisionCountsCache();
+            socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
           } catch (e: any) {
             logger.warn(`${FC_NAME}: erro ao emitir eventos de fechamento`, { error: e?.message });
           }
@@ -342,6 +351,8 @@ export function createRecuperarAtendimentoProcessor(): FunctionCallProcessorHand
 
           // Emitir evento de fechamento (para remover da lista)
           socketService.emitToRoom('supervisors', 'attendance:moved-to-fechados', closeEventData);
+          invalidateSubdivisionCountsCache();
+          socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
           // Emitir evento adicional de remoção explícita (para garantir remoção da UI)
           socketService.emitToRoom('supervisors', 'attendance:removed', {
@@ -349,6 +360,8 @@ export function createRecuperarAtendimentoProcessor(): FunctionCallProcessorHand
             reason: 'Merge realizado - atendimento consolidado',
             mergedInto: closedAttendance.id,
           });
+          invalidateSubdivisionCountsCache();
+          socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
           // Se tinha vendedor, também notificar o vendedor
           if (currentAttendance.sellerId) {

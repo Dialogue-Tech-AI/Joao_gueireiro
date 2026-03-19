@@ -31,6 +31,11 @@ const INTERVENTION_DATA_LABELS: Record<string, string> = {
   email: 'E-mail',
   observacoes: 'Observações',
   observações: 'Observações',
+  'Proximos-Passos': 'Próximos passos',
+  'Motivo-Do-Contato': 'Motivo do contato',
+  'Resumo-Da-Conversa': 'Resumo da conversa',
+  'Intencao-Do-Cliente': 'Intenção do cliente',
+  'Pra-Quem-E-A-Protese': 'Pra quem é a prótese',
   peca_desejada: 'Peça Desejada',
   pecaDesejada: 'Peça Desejada',
   resumo_da_conversa: 'Resumo Da Conversa',
@@ -643,6 +648,11 @@ export const SellerDashboard: React.FC = () => {
           return; // Not for this seller
         }
 
+        // Mensagem fromMe (dono enviando do celular): atualizar timer de 1h desligada
+        if (data.message.origin === 'SELLER' && (data.message.metadata?.fromMe || (data as any).fromMe) && data.attendanceId) {
+          fetchInactivityTimer(data.attendanceId);
+        }
+
         const clientName = conv.clientName || 'Cliente';
 
         startTransition(() => {
@@ -650,11 +660,14 @@ export const SellerDashboard: React.FC = () => {
           if (selectedConversationRef.current === data.attendanceId) {
             const isClient = data.message.origin === 'CLIENT';
             const isFromAI = data.message.origin === 'AI';
+            const isFromSeller = data.message.origin === 'SELLER';
 
             // Determine sender name
             let sender = clientName; // Use client name from conversation by default
             if (isFromAI) {
-              sender = 'Altese AI';
+              sender = 'AI';
+            } else if (isFromSeller) {
+              sender = data.message.metadata?.ownerPushName || data.message.metadata?.senderName || data.sender || 'Vendedor';
             } else if (isClient && data.message.metadata?.pushName) {
               // Prefer pushName if available (more recent/accurate)
               sender = data.message.metadata.pushName;
@@ -796,8 +809,8 @@ export const SellerDashboard: React.FC = () => {
             ? String(data.message.content).trim().slice(0, 80) + (String(data.message.content).length > 80 ? '...' : '')
             : 'Nova mensagem';
           if (document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-            const n = new Notification(`Altese • ${clientName}`, {
-              body: `💬 ${contentPreview}\nAbra o Altese para responder.`,
+            const n = new Notification(`Plataforma • ${clientName}`, {
+              body: `💬 ${contentPreview}\nAbra a plataforma para responder.`,
               icon: '/favicon.ico',
               badge: '/favicon.ico',
               tag: `msg-${data.attendanceId}-${data.message.id}`,
@@ -902,7 +915,7 @@ export const SellerDashboard: React.FC = () => {
 
           const sentMessage: any = {
             id: data.message.id,
-            sender: data.message.origin === 'AI' ? 'Altese AI' : (data.message.metadata?.senderName || user?.name || 'Você'),
+            sender: data.message.origin === 'AI' ? 'AI' : (data.message.metadata?.senderName || user?.name || 'Você'),
             content: data.message.content,
             time,
             sentAt,
@@ -1418,7 +1431,7 @@ export const SellerDashboard: React.FC = () => {
         ? `${first.clientName || first.clientPhone} + ${extraClients} cliente(s) aguardando.\n${totalUnread} mensagem(ns) não lida(s).`
         : `${first.clientName || first.clientPhone} aguardando resposta.\n${totalUnread} mensagem(ns) não lida(s).`;
 
-      const n = new Notification('Altese • Mensagens pendentes', {
+      const n = new Notification('Plataforma • Mensagens pendentes', {
         body,
         icon: '/favicon.ico',
         badge: '/favicon.ico',
@@ -1946,7 +1959,7 @@ export const SellerDashboard: React.FC = () => {
                 >
                   <span className="material-icons-round text-white">bolt</span>
                 </div>
-                <span className="text-lg font-bold tracking-tight">ALTESE</span>
+                <span className="text-lg font-bold tracking-tight">Plataforma</span>
               </div>
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -1980,16 +1993,8 @@ export const SellerDashboard: React.FC = () => {
             <span className="material-icons-round">chat</span>
             {sidebarOpen && <span className="text-sm">Chat</span>}
           </button>
-          <button className={`p-2 hover:bg-white/10 rounded-lg transition-colors flex items-center ${sidebarOpen ? 'gap-3 w-full' : 'justify-center'}`}>
-            <span className="material-icons-round">people_outline</span>
-            {sidebarOpen && <span className="text-sm">Pessoas</span>}
-          </button>
         </nav>
         <div className={`mt-auto w-full ${sidebarOpen ? 'px-3' : 'px-0'}`}>
-          <button className={`p-2 hover:bg-white/10 rounded-lg transition-colors flex items-center ${sidebarOpen ? 'gap-3 w-full' : 'justify-center w-full'}`}>
-            <span className="material-icons-round">settings</span>
-            {sidebarOpen && <span className="text-sm">Configurações</span>}
-          </button>
           <button
             type="button"
             onClick={toggleTheme}
@@ -2009,7 +2014,6 @@ export const SellerDashboard: React.FC = () => {
               <div className="w-8 h-8 bg-primary rounded-full border-2 border-white flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style={{ backgroundColor: '#F07000' }}>
                 {user?.name?.charAt(0).toUpperCase() || 'U'}
               </div>
-              <span className="text-sm">Perfil</span>
             </button>
           )}
         </div>
@@ -2926,7 +2930,7 @@ export const SellerDashboard: React.FC = () => {
                     const normalized = messages.map((msg) => ({
                       ...msg,
                       content: msg.content != null ? String(msg.content) : '',
-                      sender: msg.sender != null ? String(msg.sender) : (msg.isClient ? 'Cliente' : 'Altese AI'),
+                      sender: msg.sender != null ? String(msg.sender) : (msg.isClient ? 'Cliente' : 'AI'),
                     }));
                     const getTs = (m: any) => (m.metadata?.sentAt ? new Date(m.metadata.sentAt).getTime() : 0);
                     // Dedupe por id
@@ -3011,7 +3015,7 @@ export const SellerDashboard: React.FC = () => {
                                 className="w-9 h-9 bg-navy flex items-center justify-center rounded-full text-[10px] text-white font-medium flex-shrink-0" 
                                 style={{ backgroundColor: '#003070' }}
                               >
-                                AL
+                                {((msg.sender === 'Altese AI' ? 'AI' : msg.sender) || 'AI').substring(0, 2).toUpperCase() || 'AI'}
                               </div>
                             )
                           ) : (
@@ -3023,7 +3027,7 @@ export const SellerDashboard: React.FC = () => {
                             {isFirstInGroup && (
                               <div className={`flex items-center gap-1.5 mb-1 ${msg.isClient ? '' : 'flex-row-reverse'}`}>
                                 <span className="text-sm font-medium text-slate-600 dark:text-slate-400">
-                                  {msg.sender || (msg.isClient ? 'Cliente' : 'Altese AI')}
+                                  {(msg.sender === 'Altese AI' ? 'AI' : msg.sender) || (msg.isClient ? 'Cliente' : 'AI')}
                                 </span>
                               </div>
                             )}
@@ -3123,7 +3127,7 @@ export const SellerDashboard: React.FC = () => {
               )}
               {/* Show typing indicator if AI is typing - só quando IA está ativa (não desativada) */}
               {selectedConversation && isAITyping[selectedConversation] && selectedConversationData?.handledBy === 'AI' && !aiStatus[selectedConversation]?.disabled && (
-                <TypingIndicator sender="Altese AI" isClient={false} />
+                <TypingIndicator sender="AI" isClient={false} />
               )}
               {/* Show typing indicator if client is typing for this conversation */}
               {(() => {
@@ -3601,7 +3605,7 @@ export const SellerDashboard: React.FC = () => {
                   </div>
                   <div className="space-y-2">
                     {Object.entries(selectedConversationData.interventionData).map(([key, value]) => {
-                      const label = INTERVENTION_DATA_LABELS[key] ?? key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+                      const label = INTERVENTION_DATA_LABELS[key] ?? key.replace(/_/g, ' ').replace(/-/g, ' ').toLowerCase().replace(/^\w/, (c) => c.toUpperCase());
                       const displayValue = (key === 'client_phone' || key === 'clientPhone') && typeof value === 'string'
                         ? formatPhoneNumber(value)
                         : String(value ?? '—');

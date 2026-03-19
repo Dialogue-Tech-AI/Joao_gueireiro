@@ -43,6 +43,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
   private maxReconnectAttempts: number = 5;
   private saveCredsWithState: ((creds: any) => Promise<void>) | null = null;
   private authState: { creds: any; keys: any } | null = null;
+  private chatEphemeralCache: Map<string, number> = new Map();
 
   constructor(config: BaileysConfig) {
     this.numberId = config.numberId;
@@ -349,6 +350,33 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       await this.handlePresenceUpdate(update);
     });
 
+    // Capture ephemeral/disappearing settings from chat updates
+    this.socket.ev.on('chats.update', (updates: any[]) => {
+      for (const chat of updates) {
+        if (chat.id && chat.ephemeralExpiration && chat.ephemeralExpiration > 0) {
+          this.chatEphemeralCache.set(chat.id, chat.ephemeralExpiration);
+          logger.info('Cached ephemeral duration from chat update', {
+            numberId: this.numberId,
+            chatJid: chat.id,
+            ephemeralExpiration: chat.ephemeralExpiration,
+          });
+        }
+      }
+    });
+
+    this.socket.ev.on('chats.upsert', (chats: any[]) => {
+      for (const chat of chats) {
+        if (chat.id && chat.ephemeralExpiration && chat.ephemeralExpiration > 0) {
+          this.chatEphemeralCache.set(chat.id, chat.ephemeralExpiration);
+          logger.info('Cached ephemeral duration from chat upsert', {
+            numberId: this.numberId,
+            chatJid: chat.id,
+            ephemeralExpiration: chat.ephemeralExpiration,
+          });
+        }
+      }
+    });
+
     // Listen to all events for debugging (to catch any presence-related events)
     this.socket.ev.on('*', async (eventName, data) => {
       // Log any event that might be related to presence/typing
@@ -542,13 +570,35 @@ export class BaileysAdapter implements IWhatsAppAdapter {
           continue;
         }
 
-        // Skip messages sent by us
-        if (msg.key.fromMe) {
-          logger.debug('Skipping message sent by us (fromMe=true)', {
+        // Mensagens fromMe = dono do número enviou do celular (fora da plataforma)
+        // Processar para exibir na plataforma com nome do dono
+        const isFromMe = !!msg.key.fromMe;
+        if (isFromMe) {
+          // Para fromMe: remoteJid = cliente (chat 1:1), phoneNumber = cliente
+          // pushName do msg = nome do dono (perfil WhatsApp)
+          logger.info('Processing message from owner (fromMe=true)', {
             numberId: this.numberId,
             messageId: msg.key.id,
+            remoteJid: msg.key.remoteJid,
           });
-          continue;
+        }
+
+        // Detect and cache ephemeral duration from incoming message
+        const remoteJid = msg.key.remoteJid || '';
+        if (remoteJid) {
+          const rawMsg = msg.message as any;
+          const ephExp =
+            rawMsg?.ephemeralMessage?.message?.messageContextInfo?.expiration ||
+            rawMsg?.messageContextInfo?.expiration ||
+            rawMsg?.ephemeralMessage?.expiration;
+          if (ephExp && ephExp > 0) {
+            this.chatEphemeralCache.set(remoteJid, ephExp);
+            logger.info('Cached ephemeral duration from incoming message', {
+              numberId: this.numberId,
+              chatJid: remoteJid,
+              ephemeralExpiration: ephExp,
+            });
+          }
         }
 
         // Extract message content
@@ -817,6 +867,10 @@ export class BaileysAdapter implements IWhatsAppAdapter {
           pushName,
           participantJid: msg.key.participant || undefined,
           whatsappNumberId: this.numberId,
+          ...(isFromMe && {
+            fromMe: true,
+            ownerPushName: pushName || this.name || 'Dono',
+          }),
         };
         
         logger.debug('WhatsApp message timestamp extracted', {
@@ -1132,15 +1186,22 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       // Add sender name to message if provided
       const finalMessage = senderName ? `*${senderName}:*\n${message}` : message;
       
+      const ephemeralExpiration = this.chatEphemeralCache.get(jid);
+
       logger.info('Sending WhatsApp message', {
         numberId: this.numberId,
         to: jid,
         originalTo: to,
         messageLength: finalMessage.length,
         senderName: senderName || 'none',
+        ephemeralExpiration: ephemeralExpiration || 'none',
       });
 
-      await this.socket.sendMessage(jid, { text: finalMessage });
+      await this.socket.sendMessage(
+        jid,
+        { text: finalMessage },
+        ephemeralExpiration ? { ephemeralExpiration } : undefined,
+      );
 
       logger.info('WhatsApp message sent successfully', {
         numberId: this.numberId,
@@ -1191,28 +1252,31 @@ export class BaileysAdapter implements IWhatsAppAdapter {
         mediaType = 'document';
       }
 
+      const ephemeralExpiration = this.chatEphemeralCache.get(jid);
+      const sendOpts = ephemeralExpiration ? { ephemeralExpiration } : undefined;
+
       // Send media
       if (mediaType === 'image') {
         await this.socket.sendMessage(jid, {
           image: buffer,
           caption: caption,
-        });
+        }, sendOpts);
       } else if (mediaType === 'video') {
         await this.socket.sendMessage(jid, {
           video: buffer,
           caption: caption,
-        });
+        }, sendOpts);
       } else if (mediaType === 'audio') {
         await this.socket.sendMessage(jid, {
           audio: buffer,
           mimetype: mimeType,
-        });
+        }, sendOpts);
       } else {
         await this.socket.sendMessage(jid, {
           document: buffer,
           mimetype: mimeType,
           fileName: caption || 'document',
-        });
+        }, sendOpts);
       }
 
       logger.info('WhatsApp media sent successfully', {

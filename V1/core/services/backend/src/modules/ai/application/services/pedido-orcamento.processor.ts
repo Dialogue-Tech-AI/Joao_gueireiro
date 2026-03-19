@@ -9,6 +9,7 @@ import { In } from 'typeorm';
 import { CaseStatus, MessageOrigin, VehicleBrand, UserRole, OperationalState } from '../../../../shared/types/common.types';
 import { logger } from '../../../../shared/utils/logger';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { whatsappManagerService } from '../../../whatsapp/application/services/whatsapp-manager.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 import { canCreateNewCase } from './case-creation.utils';
@@ -248,6 +249,8 @@ export function createPedidoOrcamentoProcessor(): FunctionCallProcessorHandler {
 
             socketService.emitToRoom(`seller_${selectedSeller.id}`, 'attendance:routed', routingEventData);
             socketService.emitToRoom('supervisors', 'attendance:routed', routingEventData);
+            invalidateSubdivisionCountsCache();
+            socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
           } else {
             await queryRunner.rollbackTransaction();
             logger.warn(`${FC_NAME}: nenhum vendedor disponível para marca ${vehicleBrand}`, { attendance_id });
@@ -430,6 +433,8 @@ export function createPedidoOrcamentoProcessor(): FunctionCallProcessorHandler {
           interventionType: null,
           interventionData,
         });
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
       } catch (_) {}
 
       // Emitir Socket.IO: quote:updated quando atualizou, quote:created quando criou novo
@@ -450,6 +455,8 @@ export function createPedidoOrcamentoProcessor(): FunctionCallProcessorHandler {
         };
         const eventName = activeQuote ? 'quote:updated' : 'quote:created';
         socketService.emitToRoom('supervisors', eventName, quoteEventData);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         if (updatedAttendance?.sellerId) {
           socketService.emitToRoom(`seller_${updatedAttendance.sellerId}`, eventName, quoteEventData);
         }

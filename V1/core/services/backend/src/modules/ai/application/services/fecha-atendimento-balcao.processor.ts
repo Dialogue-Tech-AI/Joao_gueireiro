@@ -2,6 +2,7 @@ import { AppDataSource } from '../../../../shared/infrastructure/database/typeor
 import { Attendance } from '../../../attendance/domain/entities/attendance.entity';
 import { FunctionCallConfig } from '../../domain/entities/function-call-config.entity';
 import { logger } from '../../../../shared/utils/logger';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
@@ -89,6 +90,8 @@ export function createFechaAtendimentoBalcaoProcessor(): FunctionCallProcessorHa
 
       try {
         socketService.emitToRoom('supervisors', 'attendance:balcao-timer-started', eventPayload);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         logger.info(`${FC_NAME}: attendance:balcao-timer-started emitido via Socket.IO`);
       } catch (e: any) {
         logger.error(`${FC_NAME}: erro ao emitir Socket.IO`, { error: e?.message });

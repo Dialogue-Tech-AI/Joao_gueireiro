@@ -2,6 +2,7 @@ import { AppDataSource } from '../../../../shared/infrastructure/database/typeor
 import { Attendance } from '../../../attendance/domain/entities/attendance.entity';
 import { logger } from '../../../../shared/utils/logger';
 import { redisService } from '../../../../shared/infrastructure/redis/redis.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
@@ -67,6 +68,8 @@ export function createEnviaCasosGerentesProcessor(): FunctionCallProcessorHandle
 
       try {
         socketService.emitToRoom('supervisors', 'attendance:moved-to-intervention', eventPayload);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         if (attendance.sellerId) {
           socketService.emitToRoom(`seller_${attendance.sellerId}`, 'attendance:moved-to-intervention', eventPayload);
         }

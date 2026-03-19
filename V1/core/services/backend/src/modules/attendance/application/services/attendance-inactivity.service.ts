@@ -4,76 +4,213 @@ import { Attendance } from '../../domain/entities/attendance.entity';
 import { AttendanceCase } from '../../domain/entities/attendance-case.entity';
 import { Message } from '../../../message/domain/entities/message.entity';
 import { FunctionCallConfig } from '../../../ai/domain/entities/function-call-config.entity';
-import { OperationalState, AttendanceType, MessageOrigin, CaseStatus } from '../../../../shared/types/common.types';
+import { OperationalState, AttendanceType, MessageOrigin, CaseStatus, MessageStatus } from '../../../../shared/types/common.types';
 import { logger } from '../../../../shared/utils/logger';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import { InfrastructureFactory } from '../../../../shared/infrastructure/factories/infrastructure.factory';
 import { aiConfigService } from '../../../ai/application/services/ai-config.service';
+import { messageSenderService } from '../../../message/application/services/message-sender.service';
+import { invalidateSubdivisionCountsCache } from '../../presentation/controllers/attendance.controller';
 
 const FC_NAME_FECHA_BALCAO = 'fechaatendimentobalcao';
 const DEFAULT_TEMPO_INATIVIDADE_BALCAO_MIN = 30; // 30 minutos padrão
 
 export class AttendanceInactivityService {
   /**
-   * Check and close inactive attendances (2 hours without client response)
+   * Check and send follow-up messages for inactive attendances.
+   * - 1º follow-up: 1h sem resposta do cliente (após resposta AI/HUMANO)
+   * - 2º follow-up: 24h após o 1º follow-up, se cliente ainda não respondeu
+   * - Fechamento automático: 36h de inatividade (após 2º follow-up)
    */
   async checkAndCloseInactiveAttendances(): Promise<number> {
     try {
       const attendanceRepo = AppDataSource.getRepository(Attendance);
-      
-      const twoHoursAgo = new Date();
-      twoHoursAgo.setHours(twoHoursAgo.getHours() - 2);
+      const messageRepo = AppDataSource.getRepository(Message);
 
-      // Find attendances waiting for client response for more than 2 hours
-      const inactiveAttendances = await attendanceRepo.find({
+      const oneHourAgo = new Date();
+      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      const thirtySixHoursAgo = new Date();
+      thirtySixHoursAgo.setHours(thirtySixHoursAgo.getHours() - 36);
+
+      // Processar apenas atendimentos aguardando cliente e não fechados
+      const pendingAttendances = await attendanceRepo.find({
         where: {
           operationalState: OperationalState.AGUARDANDO_CLIENTE,
+          isFinalized: false,
         },
       });
 
-      let closedCount = 0;
+      let followUpsSent = 0;
+      let autoClosedCount = 0;
 
-      for (const attendance of inactiveAttendances) {
-        if (!attendance.lastClientMessageAt) {
-          // If no lastClientMessageAt, use updatedAt as fallback
-          const lastActivity = attendance.updatedAt;
-          if (lastActivity < twoHoursAgo) {
-            attendance.operationalState = OperationalState.FECHADO_OPERACIONAL;
-            await attendanceRepo.save(attendance);
-            closedCount++;
-            await this.publishCloseSummary(attendance.id);
-            logger.info('Closed inactive attendance', {
-              attendanceId: attendance.id,
-              lastActivity,
-            });
-          }
-        } else if (attendance.lastClientMessageAt < twoHoursAgo) {
-          attendance.operationalState = OperationalState.FECHADO_OPERACIONAL;
-          // NÃO alterar isFinalized (ainda pode ter garantia)
-          await attendanceRepo.save(attendance);
-          closedCount++;
-          await this.publishCloseSummary(attendance.id);
-          logger.info('Closed inactive attendance', {
+      for (const attendance of pendingAttendances) {
+        const aiContext = (attendance.aiContext ?? {}) as Record<string, any>;
+        if (aiContext.closedManually) {
+          continue;
+        }
+        const followUpState = (aiContext.followUpState ?? {}) as {
+          lastClientMessageAt?: string;
+          firstSentAt?: string;
+          secondSentAt?: string;
+        };
+
+        // Regra: follow-up não ativa quando houve function call e a última mensagem não foi do cliente.
+        const lastMessage = await messageRepo.findOne({
+          where: { attendanceId: attendance.id },
+          order: { sentAt: 'DESC' },
+        });
+        if (attendance.interventionType && lastMessage && lastMessage.origin !== MessageOrigin.CLIENT) {
+          continue;
+        }
+
+        // Precisa ter mensagem do cliente como base para contagem de inatividade.
+        const lastClientMessageAt = attendance.lastClientMessageAt ?? null;
+        if (!lastClientMessageAt) {
+          continue;
+        }
+
+        // Precisa existir resposta (AI/HUMANO) depois da última mensagem do cliente.
+        const replyAfterClient = await messageRepo.findOne({
+          where: {
             attendanceId: attendance.id,
-            lastClientMessageAt: attendance.lastClientMessageAt,
-          });
+            origin: In([MessageOrigin.AI, MessageOrigin.SELLER]),
+            sentAt: Not(LessThan(lastClientMessageAt)),
+          },
+          order: { sentAt: 'ASC' },
+        });
+        if (!replyAfterClient) {
+          continue;
+        }
+
+        // Se cliente voltou a responder desde o último ciclo, resetar estado do follow-up.
+        const lastClientIso = lastClientMessageAt.toISOString();
+        const trackedClientIso = followUpState.lastClientMessageAt;
+        const isSameClientCycle = trackedClientIso === lastClientIso;
+        const normalizedState = isSameClientCycle
+          ? followUpState
+          : { lastClientMessageAt: lastClientIso };
+
+        // Persistir reset de ciclo quando o cliente respondeu novamente.
+        if (!isSameClientCycle && (followUpState.firstSentAt || followUpState.secondSentAt)) {
+          attendance.aiContext = {
+            ...aiContext,
+            followUpState: {
+              lastClientMessageAt: lastClientIso,
+            },
+          };
+          await attendanceRepo.save(attendance);
+        }
+
+        // Fechamento automático aos 36h de inatividade para quem já recebeu 2º follow-up.
+        if (normalizedState.secondSentAt && lastClientMessageAt < thirtySixHoursAgo) {
+          await this.moveToFechados(attendance, 'followup_36h');
+          autoClosedCount++;
+          continue;
+        }
+
+        // 1º follow-up: 1 hora sem resposta do cliente
+        if (!normalizedState.firstSentAt && lastClientMessageAt < oneHourAgo) {
+          const sent = await this.sendFollowUpMessage(
+            attendance,
+            1,
+            'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.'
+          );
+          if (sent) {
+            followUpsSent++;
+            attendance.aiContext = {
+              ...aiContext,
+              followUpState: {
+                ...normalizedState,
+                firstSentAt: new Date().toISOString(),
+              },
+            };
+            await attendanceRepo.save(attendance);
+          }
+          continue;
+        }
+
+        // 2º follow-up: 24 horas após o primeiro follow-up, sem resposta do cliente
+        if (normalizedState.firstSentAt && !normalizedState.secondSentAt) {
+          const firstSentAt = new Date(normalizedState.firstSentAt);
+          const secondCutoff = new Date(firstSentAt.getTime() + 24 * 60 * 60 * 1000);
+          if (new Date() >= secondCutoff) {
+            const sent = await this.sendFollowUpMessage(
+              attendance,
+              2,
+              'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.'
+            );
+            if (sent) {
+              followUpsSent++;
+              attendance.aiContext = {
+                ...aiContext,
+                followUpState: {
+                  ...normalizedState,
+                  secondSentAt: new Date().toISOString(),
+                },
+              };
+              await attendanceRepo.save(attendance);
+            }
+          }
         }
       }
 
-      if (closedCount > 0) {
-        logger.info('Inactivity check completed', {
-          closedCount,
-          totalChecked: inactiveAttendances.length,
+      if (followUpsSent > 0 || autoClosedCount > 0) {
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+        logger.info('Follow-up inactivity check completed', {
+          followUpsSent,
+          autoClosedCount,
+          totalChecked: pendingAttendances.length,
         });
       }
 
-      return closedCount;
+      return followUpsSent + autoClosedCount;
     } catch (error: any) {
       logger.error('Error checking inactive attendances', {
         error: error.message,
         stack: error.stack,
       });
       return 0;
+    }
+  }
+
+  private async sendFollowUpMessage(attendance: Attendance, step: 1 | 2, content: string): Promise<boolean> {
+    try {
+      const messageRepo = AppDataSource.getRepository(Message);
+      const message = messageRepo.create({
+        attendanceId: attendance.id,
+        origin: MessageOrigin.AI,
+        content,
+        metadata: {
+          senderName: 'Altese AI',
+          fromFollowUp: true,
+          followUpStep: step,
+        },
+        status: MessageStatus.PENDING,
+        sentAt: new Date(),
+      });
+      await messageRepo.save(message);
+
+      await messageSenderService.sendMessageAsync(
+        message.id,
+        attendance.id,
+        content,
+        'Altese AI'
+      );
+
+      logger.info('Follow-up message sent', {
+        attendanceId: attendance.id,
+        messageId: message.id,
+        followUpStep: step,
+      });
+      return true;
+    } catch (error: any) {
+      logger.error('Failed to send follow-up message', {
+        attendanceId: attendance.id,
+        followUpStep: step,
+        error: error?.message,
+      });
+      return false;
     }
   }
 
@@ -102,6 +239,24 @@ export class AttendanceInactivityService {
         // Skip if not assumed yet
         if (!attendance.assumedAt) {
           continue;
+        }
+
+        // Pular se IA permanentemente desligada — supervisor controla quando volta
+        if (attendance.aiDisabledUntil && new Date(attendance.aiDisabledUntil).getFullYear() > 2100) {
+          continue;
+        }
+
+        // Regra de negócio:
+        // Se já houve function call no atendimento (interventionType definido)
+        // e a última mensagem NÃO foi do cliente, não acionar follow-up.
+        if (attendance.interventionType) {
+          const lastMessage = await messageRepo.findOne({
+            where: { attendanceId: attendance.id },
+            order: { sentAt: 'DESC' },
+          });
+          if (lastMessage && lastMessage.origin !== MessageOrigin.CLIENT) {
+            continue;
+          }
         }
 
         // Check if assumed more than 1 hour ago
@@ -446,6 +601,9 @@ export class AttendanceInactivityService {
         socketService.emitToRoom(`seller_${attendance.sellerId}`, 'attendance:moved-to-fechados', eventData);
       }
 
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+
       logger.info('Eventos Socket.IO emitidos para fechamento de atendimento', {
         attendanceId: attendance.id,
         reason,
@@ -516,11 +674,6 @@ export class AttendanceInactivityService {
           } else if (subdivisionKey === 'encaminhados-balcao') {
             whereClause.operationalState = Not(OperationalState.FECHADO_OPERACIONAL);
             whereClause.interventionType = 'encaminhados-balcao';
-            whereClause.sellerId = IsNull();
-          } else if (subdivisionKey === 'garantia' || subdivisionKey === 'troca' || subdivisionKey === 'estorno') {
-            // Intervenção humana (Garantia, Troca, Estorno) – não atribuídos
-            whereClause.operationalState = Not(OperationalState.FECHADO_OPERACIONAL);
-            whereClause.interventionType = subdivisionKey;
             whereClause.sellerId = IsNull();
           } else if (subdivisionKey.startsWith('seller-')) {
             // Subdivisão de vendedor: formato "seller-{sellerId}-{subdivision}"

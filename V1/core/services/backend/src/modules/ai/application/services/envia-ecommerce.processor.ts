@@ -4,6 +4,7 @@ import { FunctionCallConfig } from '../../domain/entities/function-call-config.e
 import { FunctionCallConfigService } from './function-call-config.service';
 import { whatsappManagerService } from '../../../whatsapp/application/services/whatsapp-manager.service';
 import { logger } from '../../../../shared/utils/logger';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
@@ -201,6 +202,8 @@ export function createEnviaEcommerceProcessor(): FunctionCallProcessorHandler {
 
         try {
           socketService.emitToRoom('supervisors', 'attendance:moved-to-intervention', socketPayload);
+          invalidateSubdivisionCountsCache();
+          socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
           logger.info(`${FC_NAME}: attendance:moved-to-intervention emitido via Socket.IO`);
         } catch (e: any) {
           logger.error(`${FC_NAME}: erro ao emitir Socket.IO para realocação`, { error: e?.message });
@@ -248,6 +251,8 @@ export function createEnviaEcommerceProcessor(): FunctionCallProcessorHandler {
 
         try {
           socketService.emitToRoom('supervisors', 'attendance:intervention-data-updated', socketPayload);
+          invalidateSubdivisionCountsCache();
+          socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
           logger.info(`${FC_NAME}: attendance:intervention-data-updated emitido via Socket.IO`);
         } catch (e: any) {
           logger.error(`${FC_NAME}: erro ao emitir Socket.IO para atualização`, { error: e?.message });
@@ -272,6 +277,8 @@ export function createEnviaEcommerceProcessor(): FunctionCallProcessorHandler {
 
       try {
         socketService.emitToRoom('supervisors', 'attendance:ecommerce-timer-started', eventPayload);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         logger.info(`${FC_NAME}: attendance:ecommerce-timer-started emitido via Socket.IO`);
       } catch (e: any) {
         logger.error(`${FC_NAME}: erro ao emitir Socket.IO para timer`, { error: e?.message });

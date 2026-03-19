@@ -92,6 +92,8 @@ export interface SupervisorStatsResponse {
     filteredAttendances: number;
     totalAttendances: number;
     byBrand: Record<string, number>;
+    byIntervention: Record<string, number>;
+    unclassifiedCount: number;
   };
   filters: {
     from: string;
@@ -123,10 +125,11 @@ export const attendanceService = {
    * Ativos = isFinalized: false.
    * Keys: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, garantia, troca, estorno, seller-{id}-{sub}.
    */
-  async getSubdivisionCounts(): Promise<Record<string, number>> {
-    const response = await api.get<{ success: boolean; counts: Record<string, number> }>(
-      '/attendances/supervisor/subdivision-counts'
-    );
+  async getSubdivisionCounts(options?: { bust?: boolean }): Promise<Record<string, number>> {
+    const url = options?.bust
+      ? '/attendances/supervisor/subdivision-counts?bust=1'
+      : '/attendances/supervisor/subdivision-counts';
+    const response = await api.get<{ success: boolean; counts: Record<string, number> }>(url);
     return response.data.counts ?? {};
   },
 

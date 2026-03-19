@@ -3,6 +3,7 @@ import { Attendance } from '../../../attendance/domain/entities/attendance.entit
 import { logger } from '../../../../shared/utils/logger';
 import { redisService } from '../../../../shared/infrastructure/redis/redis.service';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
 const FC_NAME = 'alocabalcao';
@@ -91,6 +92,8 @@ export function createAlocaBalcaoProcessor(): FunctionCallProcessorHandler {
 
       try {
         socketService.emitToRoom('supervisors', 'attendance:moved-to-intervention', socketPayload);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         logger.info(`${FC_NAME}: attendance:moved-to-intervention emitido via Socket.IO (tempo real)`);
       } catch (e: any) {
         logger.error(`${FC_NAME}: erro ao emitir Socket.IO`, { error: e?.message });

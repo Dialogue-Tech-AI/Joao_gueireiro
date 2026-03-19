@@ -14,6 +14,93 @@ import { mediaService } from '../../services/media.service';
 import toast from 'react-hot-toast';
 
 type VehicleBrand = 'FORD' | 'GM' | 'VW' | 'FIAT' | 'IMPORTADOS';
+
+/** Categorias de serviço (substituem marcas de veículos) */
+type ServiceCategory = 'PROTESE_CAPILAR' | 'MANUTENCAO' | 'OUTROS_ASSUNTOS';
+type FollowUpNode = 'follow-up' | 'inativo-1h' | 'inativo-12h' | 'inativo-24h';
+const SERVICE_CATEGORIES: { key: ServiceCategory; label: string; icon: string }[] = [
+  { key: 'PROTESE_CAPILAR', label: 'Prótese capilar', icon: 'spa' },
+  { key: 'MANUTENCAO', label: 'Manutenção', icon: 'build' },
+  { key: 'OUTROS_ASSUNTOS', label: 'Outros assuntos', icon: 'topic' },
+];
+/** Mapeamento categoria -> marcas (para compatibilidade com backend) */
+const CATEGORY_TO_BRANDS: Record<ServiceCategory, VehicleBrand[]> = {
+  PROTESE_CAPILAR: ['FORD'],
+  MANUTENCAO: ['GM'],
+  OUTROS_ASSUNTOS: ['VW', 'FIAT', 'IMPORTADOS'],
+};
+const FOLLOW_UP_LABELS: Record<FollowUpNode, string> = {
+  'follow-up': 'Follow UP',
+  'inativo-1h': 'Inativo > 1h',
+  'inativo-12h': 'Inativo +12h',
+  'inativo-24h': 'Inativo 24+h',
+};
+/** Mapeamento serviço -> interventionType (quando filtro Intervenção humana está ativo) */
+const SERVICE_TO_INTERVENTION: Record<ServiceCategory, string | string[]> = {
+  PROTESE_CAPILAR: 'protese-capilar',
+  MANUTENCAO: 'demanda-telefone-fixo',
+  OUTROS_ASSUNTOS: ['outros-assuntos'],
+};
+/** Mapeamento interventionType -> serviço (para roteamento em tempo real) */
+const INTERVENTION_TO_SERVICE: Record<string, ServiceCategory> = {
+  'protese-capilar': 'PROTESE_CAPILAR',
+  'demanda-telefone-fixo': 'MANUTENCAO',
+  'outros-assuntos': 'OUTROS_ASSUNTOS',
+};
+/** interventionType -> label do serviço para badge no card */
+const INTERVENTION_TO_SERVICE_LABEL: Record<string, string> = {
+  'protese-capilar': 'Prótese capilar',
+  'demanda-telefone-fixo': 'Manutenção',
+  'outros-assuntos': 'Outros assuntos',
+};
+/** Rótulos do backend (interventionTypeLabel) -> nosso label */
+const BACKEND_LABEL_TO_SERVICE: Record<string, string> = {
+  'Protese capilar': 'Prótese capilar',
+  'Demanda telefone fixo': 'Manutenção',
+  'Outros assuntos': 'Outros assuntos',
+};
+const isLegacyRelocationSystemMessage = (msg?: {
+  origin?: string;
+  content?: string;
+  metadata?: Record<string, any>;
+}): boolean => {
+  if (!msg) return false;
+  const origin = String(msg.origin || '').toUpperCase();
+  const content = String(msg.content || '');
+  const type = String(msg.metadata?.type || '').toLowerCase();
+  return origin === 'SYSTEM' && (type === 'relocation' || content.includes('Conversa realocada para'));
+};
+function getServiceLabelFromConv(conv: any, serviceHint?: ServiceCategory | null): string | null {
+  const it = conv?.interventionType ?? conv?.attributionSource?.interventionType;
+  if (it && INTERVENTION_TO_SERVICE_LABEL[it]) return INTERVENTION_TO_SERVICE_LABEL[it];
+
+  const labelRaw = String(conv?.attributionSource?.label || '').trim();
+  if (labelRaw && BACKEND_LABEL_TO_SERVICE[labelRaw]) return BACKEND_LABEL_TO_SERVICE[labelRaw];
+  if (labelRaw) {
+    const normalized = labelRaw.toLowerCase();
+    if (normalized.includes('protese') || normalized.includes('prótese')) return 'Prótese capilar';
+    if (normalized.includes('telefone fixo') || normalized.includes('manutenc')) return 'Manutenção';
+    if (normalized.includes('outros assuntos')) return 'Outros assuntos';
+    if (normalized.includes('outros assuntos')) return 'Outros assuntos';
+  }
+
+  const brand = conv?.vehicleBrand as VehicleBrand | undefined;
+  if (brand) return getCategoryLabelForBrand(brand);
+
+  if (serviceHint) {
+    const cat = SERVICE_CATEGORIES.find((c) => c.key === serviceHint);
+    if (cat) return cat.label;
+  }
+
+  return null;
+}
+/** Mapeia marca do vendedor para rótulo da categoria de serviço */
+const getCategoryLabelForBrand = (brand: VehicleBrand): string => {
+  for (const [cat, brands] of Object.entries(CATEGORY_TO_BRANDS)) {
+    if (brands.includes(brand)) return SERVICE_CATEGORIES.find(c => c.key === cat)!.label;
+  }
+  return String(brand);
+};
 type SupervisorTab = 'chat' | 'estatisticas';
 type StatsPeriod = 'dia' | 'semana' | 'mes';
 
@@ -22,6 +109,8 @@ interface SupervisorStatsState {
   filteredAttendances: number;
   totalAttendances: number;
   byBrand: Record<string, number>;
+  byIntervention: Record<string, number>;
+  unclassifiedCount: number;
 }
 
 interface Seller {
@@ -51,6 +140,11 @@ const INTERVENTION_DATA_LABELS: Record<string, string> = {
   email: 'E-mail',
   observacoes: 'Observações',
   observações: 'Observações',
+  'Proximos-Passos': 'Próximos passos',
+  'Motivo-Do-Contato': 'Motivo do contato',
+  'Resumo-Da-Conversa': 'Resumo da conversa',
+  'Intencao-Do-Cliente': 'Intenção do cliente',
+  'Pra-Quem-E-A-Protese': 'Pra quem é a prótese',
 };
 
 export const SupervisorDashboard: React.FC = () => {
@@ -63,14 +157,8 @@ export const SupervisorDashboard: React.FC = () => {
   const [activeSupervisorTab, setActiveSupervisorTab] = useState<SupervisorTab>('chat');
   const [customerSidebarOpen, setCustomerSidebarOpen] = useState(true);
   const [selectedAttendanceFilter, setSelectedAttendanceFilter] = useState<string>('tudo');
-  const [expandedBrands, setExpandedBrands] = useState<Record<string, boolean>>({});
-  const [expandedSellers, setExpandedSellers] = useState<Record<string, boolean>>({});
-  /** Dentro do dropdown do vendedor: qual vendedor tem o sub-dropdown "Demandas" aberto. */
-  const [expandedDemandasBySeller, setExpandedDemandasBySeller] = useState<Record<string, boolean>>({});
-  const [expandedIntervencaoHumano, setExpandedIntervencaoHumano] = useState<boolean>(false);
-  const [selectedIntervencaoHumano, setSelectedIntervencaoHumano] = useState<string | null>(null);
-  const [selectedIntervencaoHumanoSubdivision, setSelectedIntervencaoHumanoSubdivision] = useState<string | null>(null);
-  const [expandedNaoAtribuidos, setExpandedNaoAtribuidos] = useState<boolean>(false);
+  /** true = view "Intervenção humana" (todas intervenções com badge por serviço); false = view de serviços (vendedores) */
+  const [viewingIntervencaoHumana, setViewingIntervencaoHumana] = useState<boolean>(false);
   const [selectedNaoAtribuidosFilter, setSelectedNaoAtribuidosFilter] = useState<'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao'>('todos');
   const [selectedFechadosFilter, setSelectedFechadosFilter] = useState<boolean>(false);
   const [fechadosConversations, setFechadosConversations] = useState<Conversation[]>([]);
@@ -84,6 +172,8 @@ export const SupervisorDashboard: React.FC = () => {
   /** Quando não nulo, a view de demandas veio do dropdown "Demandas" (e não de "Todas as Demandas"). */
   const [selectedDemandaKey, setSelectedDemandaKey] = useState<string | null>(null);
   const [supervisorBrands, setSupervisorBrands] = useState<VehicleBrand[]>([]);
+  const [selectedServiceCategory, setSelectedServiceCategory] = useState<ServiceCategory | null>(null);
+  const [selectedFollowUpNode, setSelectedFollowUpNode] = useState<FollowUpNode | null>(null);
   const [supervisorSellers, setSupervisorSellers] = useState<Seller[]>([]);
   const [updatingSellerAvailabilityIds, setUpdatingSellerAvailabilityIds] = useState<Record<string, boolean>>({});
   const [availabilityNow, setAvailabilityNow] = useState(() => Date.now());
@@ -121,6 +211,7 @@ export const SupervisorDashboard: React.FC = () => {
   const [messagesOffset, setMessagesOffset] = useState(0);
   const [refreshMessagesTrigger, setRefreshMessagesTrigger] = useState(0);
   const [totalUnreadUnassigned, setTotalUnreadUnassigned] = useState(0);
+  const [totalUnreadAbertos, setTotalUnreadAbertos] = useState(0);
   const [unassignedConversationsCache, setUnassignedConversationsCache] = useState<Conversation[]>([]);
   /** Contagem de não lidas por subdivisão: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, seller-{id} */
   const [unreadBySubdivision, setUnreadBySubdivision] = useState<Record<string, number>>({});
@@ -130,7 +221,7 @@ export const SupervisorDashboard: React.FC = () => {
   const [redBySubdivision, setRedBySubdivision] = useState<Record<string, number>>({});
   /** IDs de conversas com notificação vermelha pendente (para badge no card) */
   const [redConversationIds, setRedConversationIds] = useState<Record<string, true>>({});
-  /** Contagem de atendimentos ativos por subdivisão (tempo real). Keys: triagem, encaminhados-ecommerce, demanda-telefone-fixo, seller-{id}-{sub}, etc. */
+  /** Contagem de atendimentos abertos por subdivisão (tempo real). Keys: triagem, encaminhados-ecommerce, demanda-telefone-fixo, seller-{id}-{sub}, etc. */
   const [activeCountBySubdivision, setActiveCountBySubdivision] = useState<Record<string, number>>({});
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [selectedConversationData, setSelectedConversationData] = useState<Conversation | null>(null);
@@ -160,9 +251,6 @@ export const SupervisorDashboard: React.FC = () => {
   const [isBulkSelectMode, setIsBulkSelectMode] = useState(false);
   const [selectedAttendancesForBulk, setSelectedAttendancesForBulk] = useState<Set<string>>(new Set());
   const [isClosingBulk, setIsClosingBulk] = useState(false);
-  const [assignModalOpen, setAssignModalOpen] = useState(false);
-  const [assignTargetAttendanceId, setAssignTargetAttendanceId] = useState<string | null>(null);
-  const [assignSellerId, setAssignSellerId] = useState<string | null>(null);
   const [pastedImage, setPastedImage] = useState<File | null>(null);
   const [statsPeriod, setStatsPeriod] = useState<StatsPeriod>('dia');
   const [statsDay, setStatsDay] = useState(() => new Date().toISOString().slice(0, 10));
@@ -177,14 +265,19 @@ export const SupervisorDashboard: React.FC = () => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   });
-  const [statsBrandFilter, setStatsBrandFilter] = useState<'ALL' | VehicleBrand>('ALL');
   const [supervisorStats, setSupervisorStats] = useState<SupervisorStatsState>({
     dayAttendances: 0,
     filteredAttendances: 0,
     totalAttendances: 0,
     byBrand: {},
+    byIntervention: {},
+    unclassifiedCount: 0,
   });
   const [isLoadingSupervisorStats, setIsLoadingSupervisorStats] = useState(false);
+  const [monthAttendances, setMonthAttendances] = useState(0);
+  const [isLoadingMonthAttendances, setIsLoadingMonthAttendances] = useState(false);
+  const [weekAttendances, setWeekAttendances] = useState(0);
+  const [isLoadingWeekAttendances, setIsLoadingWeekAttendances] = useState(false);
   const selectedNavTextStyle = useMemo(
     () => ({ color: isDarkMode ? '#e2e8f0' : '#003070' }),
     [isDarkMode]
@@ -212,6 +305,102 @@ export const SupervisorDashboard: React.FC = () => {
     const startIso = toIsoDate(start);
     return { from: startIso, to: toIsoDate(end), selectedDay: startIso };
   }, [statsPeriod, statsDay, statsWeekStart, statsMonth]);
+
+  const statsMonthRange = useMemo(() => {
+    const toIsoDate = (d: Date) => d.toISOString().slice(0, 10);
+    const [year, month] = statsMonth.split('-').map(Number);
+    const start = new Date(year, (month || 1) - 1, 1);
+    const end = new Date(year, month || 1, 0);
+    const startIso = toIsoDate(start);
+    return { from: startIso, to: toIsoDate(end), selectedDay: startIso };
+  }, [statsMonth]);
+
+  const statsWeekRange = useMemo(() => {
+    const toIsoDate = (d: Date) => d.toISOString().slice(0, 10);
+    const start = new Date(`${statsWeekStart}T00:00:00`);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    return { from: statsWeekStart, to: toIsoDate(end), selectedDay: statsWeekStart };
+  }, [statsWeekStart]);
+
+  const activeSupervisorTabRef = useRef(activeSupervisorTab);
+  const statsRangeRef = useRef(statsRange);
+  const statsMonthRangeRef = useRef(statsMonthRange);
+  const statsWeekRangeRef = useRef(statsWeekRange);
+  const statsRealtimeRefreshTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const statsRealtimeRefreshInFlightRef = useRef(false);
+
+  useEffect(() => {
+    activeSupervisorTabRef.current = activeSupervisorTab;
+  }, [activeSupervisorTab]);
+
+  useEffect(() => {
+    statsRangeRef.current = statsRange;
+  }, [statsRange]);
+
+  useEffect(() => {
+    statsMonthRangeRef.current = statsMonthRange;
+  }, [statsMonthRange]);
+
+  useEffect(() => {
+    statsWeekRangeRef.current = statsWeekRange;
+  }, [statsWeekRange]);
+
+  const refreshStatsRealtime = useCallback(async () => {
+    if (!user?.id || user?.role !== 'SUPERVISOR') return;
+    if (activeSupervisorTabRef.current !== 'estatisticas') return;
+    if (statsRealtimeRefreshInFlightRef.current) return;
+
+    statsRealtimeRefreshInFlightRef.current = true;
+    try {
+      const [stats, monthStats, weekStats] = await Promise.all([
+        attendanceService.getSupervisorStats({
+          from: statsRangeRef.current.from,
+          to: statsRangeRef.current.to,
+          selectedDay: statsRangeRef.current.selectedDay,
+          brand: 'ALL',
+        }),
+        attendanceService.getSupervisorStats({
+          from: statsMonthRangeRef.current.from,
+          to: statsMonthRangeRef.current.to,
+          selectedDay: statsMonthRangeRef.current.selectedDay,
+          brand: 'ALL',
+        }),
+        attendanceService.getSupervisorStats({
+          from: statsWeekRangeRef.current.from,
+          to: statsWeekRangeRef.current.to,
+          selectedDay: statsWeekRangeRef.current.selectedDay,
+          brand: 'ALL',
+        }),
+      ]);
+
+      setSupervisorStats(stats);
+      setMonthAttendances(monthStats.filteredAttendances ?? 0);
+      setWeekAttendances(weekStats.filteredAttendances ?? 0);
+    } catch (error) {
+      console.warn('Falha ao atualizar estatísticas em tempo real:', error);
+    } finally {
+      statsRealtimeRefreshInFlightRef.current = false;
+    }
+  }, [user?.id, user?.role]);
+
+  const scheduleStatsRealtimeRefresh = useCallback((delayMs = 500) => {
+    if (activeSupervisorTabRef.current !== 'estatisticas') return;
+    if (statsRealtimeRefreshTimeoutRef.current) {
+      clearTimeout(statsRealtimeRefreshTimeoutRef.current);
+    }
+    statsRealtimeRefreshTimeoutRef.current = setTimeout(() => {
+      refreshStatsRealtime();
+    }, delayMs);
+  }, [refreshStatsRealtime]);
+
+  useEffect(() => {
+    return () => {
+      if (statsRealtimeRefreshTimeoutRef.current) {
+        clearTimeout(statsRealtimeRefreshTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => setAvailabilityNow(Date.now()), 30000);
@@ -273,7 +462,7 @@ export const SupervisorDashboard: React.FC = () => {
           from: statsRange.from,
           to: statsRange.to,
           selectedDay: statsRange.selectedDay,
-          brand: statsBrandFilter,
+          brand: 'ALL',
         });
         if (!cancelled) setSupervisorStats(stats);
       } catch (error) {
@@ -289,7 +478,118 @@ export const SupervisorDashboard: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [activeSupervisorTab, statsRange, statsBrandFilter]);
+  }, [activeSupervisorTab, statsRange]);
+
+  useEffect(() => {
+    if (activeSupervisorTab !== 'estatisticas') return;
+    let cancelled = false;
+    const loadMonthAttendances = async () => {
+      try {
+        setIsLoadingMonthAttendances(true);
+        const monthStats = await attendanceService.getSupervisorStats({
+          from: statsMonthRange.from,
+          to: statsMonthRange.to,
+          selectedDay: statsMonthRange.selectedDay,
+          brand: 'ALL',
+        });
+        if (!cancelled) {
+          setMonthAttendances(monthStats.filteredAttendances ?? 0);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Error loading month attendances:', error);
+          setMonthAttendances(0);
+        }
+      } finally {
+        if (!cancelled) setIsLoadingMonthAttendances(false);
+      }
+    };
+
+    loadMonthAttendances();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSupervisorTab, statsMonthRange]);
+
+  useEffect(() => {
+    if (activeSupervisorTab !== 'estatisticas') return;
+    let cancelled = false;
+    const loadWeekAttendances = async () => {
+      try {
+        setIsLoadingWeekAttendances(true);
+        const weekStats = await attendanceService.getSupervisorStats({
+          from: statsWeekRange.from,
+          to: statsWeekRange.to,
+          selectedDay: statsWeekRange.selectedDay,
+          brand: 'ALL',
+        });
+        if (!cancelled) {
+          setWeekAttendances(weekStats.filteredAttendances ?? 0);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Error loading week attendances:', error);
+          setWeekAttendances(0);
+        }
+      } finally {
+        if (!cancelled) setIsLoadingWeekAttendances(false);
+      }
+    };
+
+    loadWeekAttendances();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSupervisorTab, statsWeekRange]);
+
+  const maintenanceBookings = useMemo(() => {
+    // Nova fonte oficial: interventionType. Mantém fallback por marca.
+    const fromIntervention = supervisorStats.byIntervention?.['demanda-telefone-fixo'] ?? 0;
+    if (fromIntervention > 0) return fromIntervention;
+    const brands = CATEGORY_TO_BRANDS.MANUTENCAO;
+    return brands.reduce((sum, b) => sum + (supervisorStats.byBrand?.[b] ?? 0), 0);
+  }, [supervisorStats.byIntervention, supervisorStats.byBrand]);
+
+  const prosthesisReferrals = useMemo(() => {
+    const fromIntervention = supervisorStats.byIntervention?.['protese-capilar'] ?? 0;
+    if (fromIntervention > 0) return fromIntervention;
+    const brands = CATEGORY_TO_BRANDS.PROTESE_CAPILAR;
+    return brands.reduce((sum, b) => sum + (supervisorStats.byBrand?.[b] ?? 0), 0);
+  }, [supervisorStats.byIntervention, supervisorStats.byBrand]);
+
+  const otherSubjectAttendances = useMemo(() => {
+    const fromIntervention = supervisorStats.byIntervention?.['outros-assuntos'] ?? 0;
+    if (fromIntervention > 0) return fromIntervention;
+    const brands = CATEGORY_TO_BRANDS.OUTROS_ASSUNTOS;
+    return brands.reduce((sum, b) => sum + (supervisorStats.byBrand?.[b] ?? 0), 0);
+  }, [supervisorStats.byIntervention, supervisorStats.byBrand]);
+
+  const percentageByAttendances = useCallback((value: number, total: number) => {
+    if (!total) return '0.0%';
+    return `${((value / total) * 100).toFixed(1)}%`;
+  }, []);
+
+  const protesePercentValue = useMemo(() => {
+    if (!supervisorStats.filteredAttendances) return 0;
+    return (prosthesisReferrals / supervisorStats.filteredAttendances) * 100;
+  }, [prosthesisReferrals, supervisorStats.filteredAttendances]);
+
+  const manutencaoPercentValue = useMemo(() => {
+    if (!supervisorStats.filteredAttendances) return 0;
+    return (maintenanceBookings / supervisorStats.filteredAttendances) * 100;
+  }, [maintenanceBookings, supervisorStats.filteredAttendances]);
+
+  const outrosPercentValue = useMemo(() => {
+    if (!supervisorStats.filteredAttendances) return 0;
+    return (otherSubjectAttendances / supervisorStats.filteredAttendances) * 100;
+  }, [otherSubjectAttendances, supervisorStats.filteredAttendances]);
+
+  const unclassifiedCount = supervisorStats.unclassifiedCount ?? 0;
+
+  const unclassifiedPercentValue = useMemo(() => {
+    if (!supervisorStats.filteredAttendances) return 0;
+    return (unclassifiedCount / supervisorStats.filteredAttendances) * 100;
+  }, [unclassifiedCount, supervisorStats.filteredAttendances]);
 
   const isSellerCurrentlyUnavailable = useCallback((seller: Seller) => {
     if (seller.isUnavailable === false) return false;
@@ -307,28 +607,12 @@ export const SupervisorDashboard: React.FC = () => {
   }, [messageInput]);
 
   // Função para obter vendedores de uma marca específica
-  const getSellersByBrand = (brand: VehicleBrand): Seller[] => {
-    const brandUpper = brand.toUpperCase();
-    const sellers = supervisorSellers.filter(seller => {
-      // Verificar se o vendedor tem a marca no array brands
-      if (!seller.brands || !Array.isArray(seller.brands)) {
-        console.warn('Seller has invalid brands array:', seller.id, seller.brands);
-        return false;
-      }
-      // Comparação normalizada (backend pode retornar "FIAT" ou "Fiat")
-      return seller.brands.some((b: string) => String(b).toUpperCase() === brandUpper);
+  const getSellersByServiceCategory = (category: ServiceCategory): Seller[] => {
+    const brands = CATEGORY_TO_BRANDS[category];
+    return supervisorSellers.filter(seller => {
+      if (!seller.brands || !Array.isArray(seller.brands)) return false;
+      return seller.brands.some((b: string) => brands.includes(String(b).toUpperCase() as VehicleBrand));
     });
-    
-    // Debug: log para verificar o que está acontecendo
-    if (sellers.length === 0 && supervisorSellers.length > 0) {
-      console.debug(`No sellers found for brand ${brand}`, {
-        brand,
-        totalSellers: supervisorSellers.length,
-        sellersBrands: supervisorSellers.map(s => ({ id: s.id, name: s.name, brands: s.brands }))
-      });
-    }
-    
-    return sellers;
   };
 
   const pendingBySubdivisionAndAttendanceRef = useRef<Record<string, Record<string, number>>>({});
@@ -516,23 +800,6 @@ export const SupervisorDashboard: React.FC = () => {
     loadSupervisorData();
   }, [user?.id]);
 
-  const getBrandLabel = (brand: VehicleBrand): string => {
-    switch (brand) {
-      case 'FORD':
-        return 'Ford';
-      case 'GM':
-        return 'GM';
-      case 'VW':
-        return 'VW';
-      case 'FIAT':
-        return 'Fiat';
-      case 'IMPORTADOS':
-        return 'Importados';
-      default:
-        return brand;
-    }
-  };
-
   // Get dynamic header title based on current selection
   const getConversationsHeaderTitle = (): string => {
     if (selectedTodasDemandasSubdivision === '__all__') return 'Todas as Demandas';
@@ -549,73 +816,42 @@ export const SupervisorDashboard: React.FC = () => {
       return subdivLabels[selectedTodasDemandasSubdivision] || selectedTodasDemandasSubdivision;
     }
 
-    if (selectedIntervencaoHumano === 'demanda-telefone-fixo') {
-      return 'Demanda telefone fixo';
+    // Intervenção humana ativa sem serviço específico (todas as intervenções)
+    if (viewingIntervencaoHumana && !selectedServiceCategory) {
+      return 'Intervenção humana';
     }
 
-    if (selectedIntervencaoHumanoSubdivision) {
-      const labels: Record<string, string> = {
-        'garantia': 'Garantia',
-        'troca': 'Troca',
-        'estorno': 'Estorno',
-      };
-      return labels[selectedIntervencaoHumanoSubdivision] || selectedIntervencaoHumanoSubdivision;
+    // Se categoria de serviço selecionada (inclui intervenção quando filtro ativo)
+    if (selectedServiceCategory) {
+      const cat = SERVICE_CATEGORIES.find(c => c.key === selectedServiceCategory);
+      return cat?.label ?? 'Atribuídos';
     }
 
-    // Se vendedor selecionado (ex.: em MARCAS), priorizar "marca → vendedor" no header
+    // Se vendedor selecionado (ex.: ao clicar "Ir para conversa" em orçamento)
     if (selectedSeller) {
       const seller = supervisorSellers.find(s => s.id === selectedSeller);
       if (seller) {
-        const brand = selectedSellerBrand ?? supervisorBrands.find(b => seller.brands.includes(b));
-        if (brand) return `${getBrandLabel(brand)} → ${seller.name}`;
+        const cat = SERVICE_CATEGORIES.find(c => getSellersByServiceCategory(c.key).some(s => s.id === seller.id));
+        if (cat) return `${cat.label} → ${seller.name}`;
         return seller.name;
       }
     }
 
-    if (selectedAttendanceFilter === 'nao-atribuidos') {
-      if (selectedNaoAtribuidosFilter === 'triagem') return 'Triagem';
-      if (selectedNaoAtribuidosFilter === 'encaminhados-ecommerce') return 'Encaminhados E-commerce';
-      if (selectedNaoAtribuidosFilter === 'encaminhados-balcao') return 'Encaminhados Balcão';
-      return 'Todos';
-    }
+    if (selectedAttendanceFilter === 'abertos') return 'Abertos';
+    if (selectedAttendanceFilter === 'nao-atribuidos') return 'AI';
+    if (selectedFollowUpNode) return FOLLOW_UP_LABELS[selectedFollowUpNode] ?? 'Follow UP';
 
     if (selectedFechadosFilter) {
       return 'Fechados';
     }
 
-    // Check if only a brand is expanded (but no seller selected)
-    // Find which brand is currently expanded and has sellers
-    const expandedBrand = supervisorBrands.find(brand => {
-      const isExpanded = expandedBrands[brand];
-      const hasSellers = getSellersByBrand(brand).length > 0;
-      return isExpanded && hasSellers && !selectedSeller;
-    });
-
-    if (expandedBrand) {
-      return getBrandLabel(expandedBrand);
-    }
-
-    // If "Atribuídos" is selected but no seller or brand
+    // If "Atribuídos" is selected but no seller or category
     if (selectedAttendanceFilter === 'tudo') {
       return 'Atribuídos';
     }
 
     // Default fallback
     return 'Atribuídos';
-  };
-
-  const toggleBrand = (brand: VehicleBrand) => {
-    setExpandedBrands((prev) => ({
-      ...prev,
-      [brand]: !prev[brand],
-    }));
-  };
-
-  const toggleSeller = (sellerId: string) => {
-    setExpandedSellers((prev) => ({
-      ...prev,
-      [sellerId]: !prev[sellerId],
-    }));
   };
 
   const handleToggleSellerAvailability = async (seller: Seller) => {
@@ -643,25 +879,110 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const toggleIntervencaoHumano = () => {
-    setExpandedIntervencaoHumano((prev) => !prev);
-  };
-
   const handleSelectNaoAtribuidos = () => {
     setSelectedConversation(null);
     setSelectedSeller(null);
     setSelectedSellerBrand(null);
-    setSelectedIntervencaoHumano(null);
+    setSelectedServiceCategory(null);
+    setViewingIntervencaoHumana(false);
     setSelectedTodasDemandasSubdivision(null);
     setSelectedDemandaKey(null);
     setSelectedFechadosFilter(false);
+    setSelectedFollowUpNode(null);
     setSelectedAttendanceFilter('nao-atribuidos');
     setSelectedNaoAtribuidosFilter('todos');
   };
 
-  const toggleNaoAtribuidosDropdown = () => {
-    setExpandedNaoAtribuidos((prev) => !prev);
+  /** Busca conversas de um serviço: vendedores + intervenções (visualização única, sem filtro on/off) */
+  const fetchServiceConversations = async (category: ServiceCategory) => {
+    setIsLoadingConversations(true);
+    try {
+      const sellersInCategory = getSellersByServiceCategory(category);
+      const sellerIds = new Set(sellersInCategory.map((s) => s.id));
+      const types = SERVICE_TO_INTERVENTION[category];
+      const interventionTypes = Array.isArray(types) ? types : [types];
+
+      const [attributedList, ...interventionLists] = await Promise.all([
+        attendanceService.getAttributedAttendances(),
+        ...interventionTypes.map((t) => attendanceService.getInterventionByType(t)),
+      ]);
+
+      const vendedorList =
+        sellerIds.size > 0
+          ? attributedList.filter((c) => {
+              const sid = (c as any).sellerId ?? (c as any).attributionSource?.sellerId;
+              return sid && sellerIds.has(sid);
+            })
+          : [];
+
+      const interventionMerged = interventionLists.flatMap((list, i) =>
+        list.map((c) => ({ ...c, interventionType: (c as any).interventionType ?? interventionTypes[i] }))
+      );
+
+      const seen = new Set<string>();
+      const merged = [...vendedorList, ...interventionMerged].filter((c) =>
+        seen.has(c.id) ? false : (seen.add(c.id), true)
+      );
+      setConversations(merged);
+    } catch (e) {
+      console.error('Error fetching service conversations', e);
+      setConversations([]);
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  };
+
+  /** Busca todas as conversas de intervenção (view Intervenção humana) */
+  const fetchAllInterventionConversations = async () => {
+    setIsLoadingConversations(true);
+    try {
+      const types = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'];
+      const lists = await Promise.all(types.map((t) => attendanceService.getInterventionByType(t)));
+      const merged = lists.flatMap((list, i) =>
+        list.map((c) => ({ ...c, interventionType: (c as any).interventionType ?? types[i] }))
+      );
+      const seen = new Set<string>();
+      setConversations(merged.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true))));
+    } catch (e) {
+      console.error('Error fetching all intervention conversations', e);
+      setConversations([]);
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  };
+
+  const handleSelectServiceCategory = (category: ServiceCategory) => {
+    const isTogglingOff = selectedServiceCategory === category;
+    setViewingIntervencaoHumana(false);
+    setSelectedFollowUpNode(null);
+    setSelectedServiceCategory(isTogglingOff ? null : category);
+    setSelectedSeller(null);
+    setSelectedSellerSubdivision(null);
+    setSelectedSellerBrand(null);
+    setSelectedAttendanceFilter('tudo');
+    setSelectedConversation(null);
+    setConversations([]);
+    if (isTogglingOff) {
+      fetchAttributedConversations();
+    } else {
+      fetchServiceConversations(category);
+    }
+  };
+
+  const handleSelectFollowUpNode = (node: FollowUpNode) => {
+    setSelectedFollowUpNode(node);
+    setSelectedConversation(null);
+    setSelectedSeller(null);
+    setSelectedSellerBrand(null);
+    setSelectedServiceCategory(null);
+    setViewingIntervencaoHumana(false);
+    setSelectedNaoAtribuidosFilter('todos');
+    setSelectedAttendanceFilter('tudo');
     setSelectedFechadosFilter(false);
+    setSelectedTodasDemandasSubdivision(null);
+    setSelectedDemandaKey(null);
+    setConversations([]);
+    setSearchTerm('');
   };
 
   const toggleTodasDemandas = () => {
@@ -675,8 +996,8 @@ export const SupervisorDashboard: React.FC = () => {
     setSelectedSeller(null);
     setSelectedSellerSubdivision(null);
     setSelectedSellerBrand(null);
-    setSelectedIntervencaoHumano(null);
-    setSelectedIntervencaoHumanoSubdivision(null);
+    setSelectedServiceCategory(null);
+    setViewingIntervencaoHumana(false);
     setSelectedAttendanceFilter('tudo');
     setSelectedConversation(null);
     setConversations([]); // Clear conversations
@@ -716,8 +1037,8 @@ export const SupervisorDashboard: React.FC = () => {
     setSelectedSeller(null);
     setSelectedSellerSubdivision(null);
     setSelectedSellerBrand(null);
-    setSelectedIntervencaoHumano(null);
-    setSelectedIntervencaoHumanoSubdivision(null);
+    setSelectedServiceCategory(null);
+    setViewingIntervencaoHumana(false);
     setSelectedAttendanceFilter('tudo');
     setSelectedConversation(null);
     setConversations([]);
@@ -797,8 +1118,8 @@ export const SupervisorDashboard: React.FC = () => {
     setSelectedSellerSubdivision(subdivision || null);
     setSelectedSellerBrand(brand ?? null);
     setSelectedConversation(null);
-    setSelectedIntervencaoHumano(null);
-    setSelectedIntervencaoHumanoSubdivision(null);
+    setSelectedServiceCategory(null);
+    setViewingIntervencaoHumana(false);
     setSelectedTodasDemandasSubdivision(null);
     setSelectedDemandaKey(null);
     setPendingQuotes([]);
@@ -850,6 +1171,46 @@ export const SupervisorDashboard: React.FC = () => {
       console.error('Error loading seller conversations:', error);
       toast.error('Erro ao carregar conversas do vendedor');
       setConversations([]);
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  };
+
+  const fetchAbertosConversations = async () => {
+    setIsLoadingConversations(true);
+    try {
+      const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
+      const [unassigned, attributed, demandaFixo, ...otherInterventions] = await Promise.all([
+        attendanceService.getUnassignedAttendances('todos'),
+        attendanceService.getAttributedAttendances(),
+        attendanceService.getInterventionDemandaTelefoneFixo(),
+        attendanceService.getInterventionByType('protese-capilar'),
+        attendanceService.getInterventionByType('outros-assuntos'),
+      ]);
+      const interventionLists = [demandaFixo, ...otherInterventions];
+      const interventionMerged = interventionLists.flatMap((list, i) =>
+        list.map((c) => ({
+          ...c,
+          interventionType: (c as any).interventionType ?? interventionTypes[i],
+          attributionSource: { type: 'intervention' as const, label: INTERVENTION_TO_SERVICE_LABEL[interventionTypes[i]] ?? interventionTypes[i], interventionType: interventionTypes[i] },
+        }))
+      );
+      const seen = new Set<string>();
+      const merged = [...unassigned, ...attributed, ...interventionMerged].filter((c) =>
+        seen.has(String(c.id)) ? false : (seen.add(String(c.id)), true)
+      );
+      const readIds = markedAsReadIdsRef.current;
+      const toSet = merged
+        .map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c))
+        .sort((a, b) => getConversationSortTimestamp(b) - getConversationSortTimestamp(a));
+      setConversations(toSet);
+      const totalUnread = toSet.reduce((sum, c) => sum + ((c as { unread?: number }).unread ?? 0), 0);
+      setTotalUnreadAbertos(totalUnread);
+    } catch (e) {
+      console.error('Error fetching abertos conversations', e);
+      toast.error('Erro ao carregar atendimentos abertos.');
+      setConversations([]);
+      setTotalUnreadAbertos(0);
     } finally {
       setIsLoadingConversations(false);
     }
@@ -932,13 +1293,29 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const fetchAttributedConversations = async () => {
+  const fetchAttributedConversations = async (filterSellerIds?: Set<string>, includeInterventionType?: string) => {
     setIsLoadingConversations(true);
     try {
-      const list = await attendanceService.getAttributedAttendances();
+      let list = await attendanceService.getAttributedAttendances();
+      if (filterSellerIds && filterSellerIds.size > 0) {
+        list = list.filter((c) => {
+          const att = (c as any).attributionSource;
+          const sid = (c as any).sellerId ?? att?.sellerId;
+          const isIntervention = att?.type === 'intervention' && att?.interventionType;
+          if (includeInterventionType && isIntervention && att.interventionType === includeInterventionType) {
+            return true;
+          }
+          return sid && filterSellerIds.has(sid);
+        });
+      } else if (includeInterventionType) {
+        list = list.filter((c) => {
+          const att = (c as any).attributionSource;
+          return att?.type === 'intervention' && att?.interventionType === includeInterventionType;
+        });
+      }
       setConversations(list);
       // Popular unreadBySubdivision a partir do backend (MessageRead persistido) para que reload mostre correto
-      const ATRIB_KEYS = ['demanda-telefone-fixo', 'garantia', 'troca', 'estorno'] as const;
+      const ATRIB_KEYS = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
       const sellerSubs = ['pedidos-orcamentos', 'perguntas-pos-orcamento', 'confirmacao-pix', 'tirar-pedido', 'informacoes-entrega', 'encomendas', 'cliente-pediu-humano'];
       const ref = pendingBySubdivisionAndAttendanceRef.current;
       for (const k of ATRIB_KEYS) delete ref[k];
@@ -987,55 +1364,50 @@ export const SupervisorDashboard: React.FC = () => {
 
   // Efeito para carregar conversas não atribuídas ou atribuídas quando o filtro é selecionado
   useEffect(() => {
-    if (selectedAttendanceFilter === 'nao-atribuidos') {
+    if (selectedAttendanceFilter === 'abertos') {
       setSelectedSeller(null);
       setSelectedSellerBrand(null);
-      setSelectedIntervencaoHumano(null);
-      setSelectedIntervencaoHumanoSubdivision(null);
+      setSelectedTodasDemandasSubdivision(null);
+      setSelectedFechadosFilter(false);
+      setViewingIntervencaoHumana(false);
+      setSelectedServiceCategory(null);
+      setSearchTerm('');
+      setConversations([]);
+      fetchAbertosConversations();
+    } else if (selectedAttendanceFilter === 'nao-atribuidos') {
+      setSelectedSeller(null);
+      setSelectedSellerBrand(null);
       setSelectedTodasDemandasSubdivision(null);
       setSelectedFechadosFilter(false);
       setSearchTerm('');
-      setConversations([]); // Limpar imediatamente para não exibir atribuídos/intervenção
+      setConversations([]);
       fetchUnassignedConversations(selectedNaoAtribuidosFilter);
     } else if (selectedFechadosFilter) {
       setSelectedSeller(null);
       setSelectedSellerBrand(null);
-      setSelectedIntervencaoHumano(null);
-      setSelectedIntervencaoHumanoSubdivision(null);
       setSelectedTodasDemandasSubdivision(null);
       setSearchTerm('');
       fetchFechadosConversations();
-    } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedIntervencaoHumano && !selectedTodasDemandasSubdivision) {
+    } else if (selectedFollowUpNode) {
+      setSelectedSeller(null);
+      setSelectedSellerBrand(null);
+      setSelectedServiceCategory(null);
+      setViewingIntervencaoHumana(false);
+      setSelectedTodasDemandasSubdivision(null);
+      setSearchTerm('');
+      setConversations([]);
+      setIsLoadingConversations(false);
+    } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && selectedServiceCategory) {
+      setSearchTerm('');
+      fetchServiceConversations(selectedServiceCategory);
+    } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && !selectedServiceCategory && viewingIntervencaoHumana) {
+      setSearchTerm('');
+      fetchAllInterventionConversations();
+    } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && !selectedServiceCategory) {
       setSearchTerm('');
       fetchAttributedConversations();
-    } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && selectedIntervencaoHumano !== 'demanda-telefone-fixo') {
-      setSearchTerm('');
     }
-  }, [selectedAttendanceFilter, selectedIntervencaoHumano, selectedNaoAtribuidosFilter, selectedTodasDemandasSubdivision, selectedFechadosFilter]);
-
-  // Carregar lista "Demanda telefone fixo" quando selecionado em Intervenção humana
-  useEffect(() => {
-    if (selectedIntervencaoHumano === 'demanda-telefone-fixo') {
-      setSearchTerm('');
-      fetchInterventionDemandaTelefoneFixo();
-    }
-  }, [selectedIntervencaoHumano]);
-
-  // Carregar subdivisões de intervenção humana
-  useEffect(() => {
-    if (selectedIntervencaoHumanoSubdivision) {
-      setSearchTerm('');
-      const subdivisionMap: Record<string, { type: string; label: string }> = {
-        'garantia': { type: 'garantia', label: 'Garantia' },
-        'troca': { type: 'troca', label: 'Troca' },
-        'estorno': { type: 'estorno', label: 'Estorno' },
-      };
-      const config = subdivisionMap[selectedIntervencaoHumanoSubdivision];
-      if (config) {
-        fetchInterventionByType(config.type, config.label);
-      }
-    }
-  }, [selectedIntervencaoHumanoSubdivision]);
+  }, [selectedAttendanceFilter, selectedNaoAtribuidosFilter, selectedTodasDemandasSubdivision, selectedFechadosFilter, selectedServiceCategory, viewingIntervencaoHumana, selectedFollowUpNode]);
 
   // Clear search when seller changes
   useEffect(() => {
@@ -1074,12 +1446,8 @@ export const SupervisorDashboard: React.FC = () => {
     };
   }, [
     checkEntryNavScroll,
-    expandedBrands,
-    expandedNaoAtribuidos,
-    expandedIntervencaoHumano,
     expandedTodasDemandas,
-    expandedSellers,
-    supervisorBrands,
+    selectedServiceCategory,
     supervisorSellers,
   ]);
 
@@ -1090,8 +1458,7 @@ export const SupervisorDashboard: React.FC = () => {
   const selectedAttendanceFilterRef = useRef(selectedAttendanceFilter);
   const selectedSellerRef = useRef(selectedSeller);
   const selectedSellerSubdivisionRef = useRef(selectedSellerSubdivision);
-  const selectedIntervencaoHumanoRef = useRef(selectedIntervencaoHumano);
-  const selectedIntervencaoHumanoSubdivisionRef = useRef(selectedIntervencaoHumanoSubdivision);
+  const viewingIntervencaoHumanaRef = useRef(viewingIntervencaoHumana);
   const selectedConversationDataRef = useRef(selectedConversationData);
   const conversationsRef = useRef(conversations);
   const unassignedConversationsCacheRef = useRef(unassignedConversationsCache);
@@ -1099,6 +1466,8 @@ export const SupervisorDashboard: React.FC = () => {
   const isLoadingMessagesRef = useRef(false); // Proteção contra múltiplas chamadas simultâneas
   const markAsReadInProgressRef = useRef<Set<string>>(new Set()); // Proteção contra múltiplas chamadas de markAsRead
   const selectedNaoAtribuidosFilterRef = useRef(selectedNaoAtribuidosFilter);
+  const selectedServiceCategoryRef = useRef(selectedServiceCategory);
+  const supervisorSellersRef = useRef(supervisorSellers);
   /** IDs removidos via fallback (message_received + sellerId). Evita que fetch em flight re-adicione. */
   const recentlyRemovedViaFallbackRef = useRef<Set<string>>(new Set());
   /** IDs roteados nesta sessão — nunca exibir em "Não Atribuídos" (Todos/Triagem/etc.), mesmo que a API devolva. */
@@ -1124,12 +1493,8 @@ export const SupervisorDashboard: React.FC = () => {
   }, [selectedSellerSubdivision]);
 
   useEffect(() => {
-    selectedIntervencaoHumanoRef.current = selectedIntervencaoHumano;
-  }, [selectedIntervencaoHumano]);
-
-  useEffect(() => {
-    selectedIntervencaoHumanoSubdivisionRef.current = selectedIntervencaoHumanoSubdivision;
-  }, [selectedIntervencaoHumanoSubdivision]);
+    viewingIntervencaoHumanaRef.current = viewingIntervencaoHumana;
+  }, [viewingIntervencaoHumana]);
 
   useEffect(() => {
     selectedConversationDataRef.current = selectedConversationData;
@@ -1148,16 +1513,27 @@ export const SupervisorDashboard: React.FC = () => {
   }, [selectedNaoAtribuidosFilter]);
 
   useEffect(() => {
+    selectedServiceCategoryRef.current = selectedServiceCategory;
+  }, [selectedServiceCategory]);
+
+  useEffect(() => {
+    supervisorSellersRef.current = supervisorSellers;
+  }, [supervisorSellers]);
+
+  useEffect(() => {
     const tri = unreadBySubdivision['triagem'] ?? 0;
     const eco = unreadBySubdivision['encaminhados-ecommerce'] ?? 0;
     const bal = unreadBySubdivision['encaminhados-balcao'] ?? 0;
     setTotalUnreadUnassigned(tri + eco + bal);
   }, [unreadBySubdivision]);
 
-  /** Contagem de atendimentos ativos na subdivisão (para exibir em todas as subdivisões da sidebar). */
+  /** Contagem de atendimentos abertos na subdivisão (para exibir em todas as subdivisões da sidebar). */
   const getActiveCount = useCallback((key: string): number => {
     if (key === 'todos') {
       return (activeCountBySubdivision['triagem'] ?? 0) + (activeCountBySubdivision['encaminhados-ecommerce'] ?? 0) + (activeCountBySubdivision['encaminhados-balcao'] ?? 0);
+    }
+    if (key === 'abertos') {
+      return activeCountBySubdivision['abertos'] ?? 0;
     }
     if (key === 'attributed') {
       return activeCountBySubdivision['attributed'] ?? 0;
@@ -1173,10 +1549,10 @@ export const SupervisorDashboard: React.FC = () => {
     return activeCountBySubdivision[key] ?? 0;
   }, [activeCountBySubdivision, supervisorSellers]);
 
-  const fetchSubdivisionCounts = useCallback(async () => {
+  const fetchSubdivisionCounts = useCallback(async (options?: { bust?: boolean }) => {
     if (!user?.id || user?.role !== 'SUPERVISOR') return;
     try {
-      const counts = await attendanceService.getSubdivisionCounts();
+      const counts = await attendanceService.getSubdivisionCounts(options);
       setActiveCountBySubdivision(counts);
     } catch (e) {
       console.warn('Erro ao buscar contagens por subdivisão:', e);
@@ -1189,7 +1565,7 @@ export const SupervisorDashboard: React.FC = () => {
     // Interval maior para reduzir carga no backend (consulta pesada)
     const interval = setInterval(fetchSubdivisionCounts, 30000);
     return () => clearInterval(interval);
-  }, [user?.id, user?.role, fetchSubdivisionCounts]);
+  }, [user?.id, user?.role, fetchSubdivisionCounts, scheduleStatsRealtimeRefresh]);
 
   // Socket.IO: Connect and listen for real-time updates
   useEffect(() => {
@@ -1374,6 +1750,7 @@ export const SupervisorDashboard: React.FC = () => {
           metadata?: Record<string, any>;
         };
       }) => {
+        if (isLegacyRelocationSystemMessage(data?.message as any)) return;
         const msgId = data?.message?.id;
         if (msgId && processedMessageReceivedRef.current.has(msgId)) {
           return;
@@ -1470,6 +1847,11 @@ export const SupervisorDashboard: React.FC = () => {
 
         // Evitar processar resto do handler (adicionar à lista de mensagens, etc.) após remoção por fallback
         if (didFallbackRemove) return;
+
+        // Mensagem fromMe (dono enviando do celular): atualizar timer de 1h desligada
+        if (data.message.origin === 'SELLER' && (data.message.metadata?.fromMe || (data as any).fromMe) && data.attendanceId) {
+          fetchInactivityTimer(data.attendanceId);
+        }
 
         // Start typing indicator when client sends a message (for AI response)
         // Padrão: usar handledBy do payload (backend), depois conversation. Para não-atribuídos/intervenção, assumir AI.
@@ -1575,9 +1957,9 @@ export const SupervisorDashboard: React.FC = () => {
           // Determine sender name (fallback: clientName da conversa em vez de "Cliente" genérico)
           let sender = 'Cliente';
           if (isFromSeller) {
-            sender = data.message.metadata?.senderName || user?.name || 'Vendedor';
+            sender = data.message.metadata?.ownerPushName || data.message.metadata?.senderName || data.sender || user?.name || 'Vendedor';
           } else if (isFromAI) {
-            sender = 'Altese AI';
+            sender = 'AI';
           } else if (isClient && data.message.metadata?.pushName) {
             sender = data.message.metadata.pushName;
           } else if (isClient) {
@@ -1798,6 +2180,7 @@ export const SupervisorDashboard: React.FC = () => {
           metadata?: Record<string, any>;
         };
       }) => {
+        if (isLegacyRelocationSystemMessage(data?.message as any)) return;
         console.log('Message sent confirmation via Socket.IO', data);
 
         // Refresh inactivity timer when human sends a message (backend already updated assumedAt)
@@ -1849,7 +2232,7 @@ export const SupervisorDashboard: React.FC = () => {
         // Determine sender name
         let sender = user?.name || 'Você';
         if (isFromAI) {
-          sender = 'Altese AI';
+          sender = 'AI';
         } else if (isFromSeller) {
           // Use sender name from message if available, otherwise use user name
           sender = data.message.metadata?.senderName || user?.name || 'Vendedor';
@@ -2148,6 +2531,7 @@ export const SupervisorDashboard: React.FC = () => {
             position: 'top-right',
           });
           fetchSubdivisionCounts();
+          scheduleStatsRealtimeRefresh();
         } catch (err) {
           console.error('❌ ERROR in handleAttendanceRouted:', err);
         }
@@ -2238,13 +2622,12 @@ export const SupervisorDashboard: React.FC = () => {
           if (!data || !data.attendanceId) return;
           const type = data.interventionType;
           const isDemandaTelefoneFixo = type === 'demanda-telefone-fixo';
-          const isGarantia = type === 'garantia';
-          const isTroca = type === 'troca';
-          const isEstorno = type === 'estorno';
+          const isProteseCapilar = type === 'protese-capilar';
+          const isOutrosAssuntos = type === 'outros-assuntos';
           const isEncaminhadosEcommerce = type === 'encaminhados-ecommerce';
           const isEncaminhadosBalcao = type === 'encaminhados-balcao';
           const isCasosGerentes = type === 'casos_gerentes';
-          if (!isDemandaTelefoneFixo && !isGarantia && !isTroca && !isEstorno && !isEncaminhadosEcommerce && !isEncaminhadosBalcao && !isCasosGerentes) return;
+          if (!isDemandaTelefoneFixo && !isProteseCapilar && !isOutrosAssuntos && !isEncaminhadosEcommerce && !isEncaminhadosBalcao && !isCasosGerentes) return;
 
           const aid = String(data.attendanceId);
           const isViewing = String(selectedConversationRef.current) === aid;
@@ -2289,146 +2672,37 @@ export const SupervisorDashboard: React.FC = () => {
             return;
           }
 
-          if (isDemandaTelefoneFixo) {
-            const relKey = `relocation-${aid}-demanda-telefone-fixo`;
+          if (isDemandaTelefoneFixo || isProteseCapilar || isOutrosAssuntos) {
+            const relKey = `relocation-${aid}-${type}`;
             if (processedRelocationsRef.current.has(relKey) && !isViewing) return;
             if (isViewing) {
               startTransition(() => {
                 if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
                 setSelectedAttendanceFilter('tudo');
-                setSelectedIntervencaoHumano('demanda-telefone-fixo');
-                setExpandedIntervencaoHumano(true);
+                setSelectedServiceCategory(null);
+                setViewingIntervencaoHumana(true);
                 updateCardData();
               });
-              fetchInterventionDemandaTelefoneFixo();
+              fetchAllInterventionConversations();
               return;
             }
             if (!isViewing) {
-              incrementSubdivision('demanda-telefone-fixo', 1, aid);
-              incrementRed('intervencao-humana', 'demanda-telefone-fixo', aid);
+              incrementSubdivision(type, 1, aid);
+              incrementRed('intervencao-humana', type, aid);
             }
             processedRelocationsRef.current.add(relKey);
             startTransition(() => {
               if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-              if (selectedIntervencaoHumanoRef.current === 'demanda-telefone-fixo') fetchInterventionDemandaTelefoneFixo();
+              if (viewingIntervencaoHumanaRef.current) {
+                fetchAllInterventionConversations();
+              }
             });
             if (processedRelocationsRef.current.size > 100) {
               const arr = Array.from(processedRelocationsRef.current);
               processedRelocationsRef.current = new Set(arr.slice(-50));
             }
             try {
-              await attendanceService.relocationSeen(aid, false, 'demanda-telefone-fixo');
-            } catch (e) {
-              console.error('relocation-seen error', e);
-              processedRelocationsRef.current.delete(relKey);
-            }
-            return;
-          }
-
-          if (isGarantia) {
-            const relKey = `relocation-${aid}-garantia`;
-            if (processedRelocationsRef.current.has(relKey) && !isViewing) return;
-            if (isViewing) {
-              startTransition(() => {
-                if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-                setSelectedAttendanceFilter('tudo');
-                setSelectedIntervencaoHumano(null);
-                setSelectedIntervencaoHumanoSubdivision('garantia');
-                setExpandedIntervencaoHumano(true);
-                updateCardData();
-              });
-              fetchInterventionByType('garantia', 'Garantia');
-              return;
-            }
-            if (!isViewing) {
-              incrementSubdivision('garantia', 1, aid);
-              incrementRed('intervencao-humana', 'garantia', aid);
-            }
-            processedRelocationsRef.current.add(relKey);
-            startTransition(() => {
-              if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-              if (selectedIntervencaoHumanoSubdivisionRef.current === 'garantia') fetchInterventionByType('garantia', 'Garantia');
-            });
-            if (processedRelocationsRef.current.size > 100) {
-              const arr = Array.from(processedRelocationsRef.current);
-              processedRelocationsRef.current = new Set(arr.slice(-50));
-            }
-            try {
-              await attendanceService.relocationSeen(aid, false, 'garantia');
-            } catch (e) {
-              console.error('relocation-seen error', e);
-              processedRelocationsRef.current.delete(relKey);
-            }
-            return;
-          }
-
-          if (isTroca) {
-            const relKey = `relocation-${aid}-troca`;
-            if (processedRelocationsRef.current.has(relKey) && !isViewing) return;
-            if (isViewing) {
-              startTransition(() => {
-                if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-                setSelectedAttendanceFilter('tudo');
-                setSelectedIntervencaoHumano(null);
-                setSelectedIntervencaoHumanoSubdivision('troca');
-                setExpandedIntervencaoHumano(true);
-                updateCardData();
-              });
-              fetchInterventionByType('troca', 'Troca');
-              return;
-            }
-            if (!isViewing) {
-              incrementSubdivision('troca', 1, aid);
-              incrementRed('intervencao-humana', 'troca', aid);
-            }
-            processedRelocationsRef.current.add(relKey);
-            startTransition(() => {
-              if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-              if (selectedIntervencaoHumanoSubdivisionRef.current === 'troca') fetchInterventionByType('troca', 'Troca');
-            });
-            if (processedRelocationsRef.current.size > 100) {
-              const arr = Array.from(processedRelocationsRef.current);
-              processedRelocationsRef.current = new Set(arr.slice(-50));
-            }
-            try {
-              await attendanceService.relocationSeen(aid, false, 'troca');
-            } catch (e) {
-              console.error('relocation-seen error', e);
-              processedRelocationsRef.current.delete(relKey);
-            }
-            return;
-          }
-
-          if (isEstorno) {
-            const relKey = `relocation-${aid}-estorno`;
-            if (processedRelocationsRef.current.has(relKey) && !isViewing) return;
-            if (isViewing) {
-              startTransition(() => {
-                if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-                setSelectedAttendanceFilter('tudo');
-                setSelectedIntervencaoHumano(null);
-                setSelectedIntervencaoHumanoSubdivision('estorno');
-                setExpandedIntervencaoHumano(true);
-                updateCardData();
-              });
-              fetchInterventionByType('estorno', 'Estorno');
-              return;
-            }
-            if (!isViewing) {
-              incrementSubdivision('estorno', 1, aid);
-              incrementRed('intervencao-humana', 'estorno', aid);
-            }
-            processedRelocationsRef.current.add(relKey);
-            startTransition(() => {
-              if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-              if (selectedIntervencaoHumanoSubdivisionRef.current === 'estorno') fetchInterventionByType('estorno', 'Estorno');
-            });
-            if (processedRelocationsRef.current.size > 100) {
-              const arr = Array.from(processedRelocationsRef.current);
-              processedRelocationsRef.current = new Set(arr.slice(-50));
-            }
-            try {
-              await attendanceService.relocationSeen(aid, false, 'estorno');
+              await attendanceService.relocationSeen(aid, false, type);
             } catch (e) {
               console.error('relocation-seen error', e);
               processedRelocationsRef.current.delete(relKey);
@@ -2453,7 +2727,6 @@ export const SupervisorDashboard: React.FC = () => {
                 if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
                 setSelectedAttendanceFilter('nao-atribuidos');
                 setSelectedNaoAtribuidosFilter(subFilter);
-                setExpandedNaoAtribuidos(true);
                 updateCardData();
               });
               fetchUnassignedConversations(subFilter);
@@ -2465,6 +2738,7 @@ export const SupervisorDashboard: React.FC = () => {
             }
           }
           fetchSubdivisionCounts();
+          scheduleStatsRealtimeRefresh();
         } catch (err) {
           console.error('handleMovedToIntervention error', err);
         }
@@ -2498,6 +2772,7 @@ export const SupervisorDashboard: React.FC = () => {
           );
         }
         fetchSubdivisionCounts();
+        scheduleStatsRealtimeRefresh();
       };
 
       const handleAttendanceReturnedToAI = (data: { attendanceId: string; handledBy: 'AI'; returnedBy: string; returnedAt: string }) => {
@@ -2519,6 +2794,7 @@ export const SupervisorDashboard: React.FC = () => {
           );
         }
         fetchSubdivisionCounts();
+        scheduleStatsRealtimeRefresh();
       };
 
       // Handler para quando atendimento é movido para Fechados
@@ -2534,6 +2810,10 @@ export const SupervisorDashboard: React.FC = () => {
           const filtered = prev.filter((conv) => conv.id !== data.attendanceId);
           if (filtered.length !== prev.length) {
             console.log(`Removed attendance ${data.attendanceId} from conversations list (moved to Fechados)`);
+            if (selectedAttendanceFilterRef.current === 'abertos' && attendanceToRemove) {
+              const prevUnread = (attendanceToRemove as { unread?: number }).unread ?? 0;
+              setTotalUnreadAbertos((u) => Math.max(0, u - prevUnread));
+            }
           }
           return filtered;
         });
@@ -2590,6 +2870,7 @@ export const SupervisorDashboard: React.FC = () => {
 
         // Atualizar contagens (busca do servidor para garantir sincronização)
         fetchSubdivisionCounts();
+        scheduleStatsRealtimeRefresh();
 
         // Se a visualização atual for Fechados, recarregar
         if (selectedFechadosFilter) {
@@ -2600,8 +2881,14 @@ export const SupervisorDashboard: React.FC = () => {
       // Handler para quando atendimento é reaberto (sai de Fechados): atualizar listas no supervisor
       const handleReopenedOrRemovedFromFechados = () => {
         fetchSubdivisionCounts();
+        scheduleStatsRealtimeRefresh();
         fetchFechadosConversations();
-        fetchAttributedConversations();
+        const cat = selectedServiceCategoryRef.current;
+        const sellers = supervisorSellersRef.current;
+        const filterIds = cat
+          ? new Set(sellers.filter((s) => s.brands?.some((b) => CATEGORY_TO_BRANDS[cat]?.includes(String(b).toUpperCase() as VehicleBrand))).map((s) => s.id))
+          : undefined;
+        fetchAttributedConversations(filterIds?.size ? filterIds : undefined);
       };
       socketService.on('attendance:reopened', handleReopenedOrRemovedFromFechados);
       socketService.on('attendance:removed-from-fechados', handleReopenedOrRemovedFromFechados);
@@ -2631,6 +2918,7 @@ export const SupervisorDashboard: React.FC = () => {
 
         // Atualizar contagens
         fetchSubdivisionCounts();
+        scheduleStatsRealtimeRefresh();
       };
 
       socketService.on('attendance_assumed', handleAttendanceAssumed);
@@ -2739,9 +3027,15 @@ export const SupervisorDashboard: React.FC = () => {
       };
       socketService.on('attendance:marked-read-by-seller', handleMarkedReadBySeller);
 
+      const handleSubdivisionCountsChanged = () => {
+        fetchSubdivisionCounts({ bust: true });
+      };
+      socketService.on('subdivision_counts_changed', handleSubdivisionCountsChanged);
+
       // Cleanup on unmount
       return () => {
         console.log('🧹 Cleaning up socket listeners');
+        socketService.off('subdivision_counts_changed', handleSubdivisionCountsChanged);
         socketService.off('attendance:marked-read-by-seller', handleMarkedReadBySeller);
         socketService.off('new_unassigned_message', handleNewUnassignedMessage);
         socketService.off('message_received', handleMessageReceived);
@@ -2834,6 +3128,8 @@ export const SupervisorDashboard: React.FC = () => {
         unassignedSource: (conv as any).unassignedSource,
         sellerId: (conv as any).sellerId,
         sellerSubdivision: (conv as any).sellerSubdivision,
+        interventionType: (conv as any).interventionType,
+        vehicleBrand: (conv as any).vehicleBrand,
       };
     });
   };
@@ -3073,7 +3369,8 @@ export const SupervisorDashboard: React.FC = () => {
       }
       try {
         const response = await attendanceService.getAttendanceMessages(convId, 15, 0);
-        const sortedFromApi = [...response.messages].sort((a: Message, b: Message) => {
+        const visibleMessages = response.messages.filter((m: Message) => !isLegacyRelocationSystemMessage(m as any));
+        const sortedFromApi = [...visibleMessages].sort((a: Message, b: Message) => {
           const timeA = getMessageTimestamp(a);
           const timeB = getMessageTimestamp(b);
           if (timeA !== timeB) return timeA - timeB;
@@ -3155,7 +3452,7 @@ export const SupervisorDashboard: React.FC = () => {
                 const updated = prev.map((c) =>
                   c.id === selectedConversation ? { ...c, unread: 0 } : c
                 );
-                if (selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'triagem') {
+                if (selectedAttendanceFilter === 'nao-atribuidos') {
                   setUnassignedConversationsCache((prevCache) =>
                     prevCache.map((c) => (c.id === selectedConversation ? { ...c, unread: 0 } : c))
                   );
@@ -3175,8 +3472,9 @@ export const SupervisorDashboard: React.FC = () => {
 
         // Decrement badge only when opening a conversation with pending notifications (never when opening subdivision)
         let subdivisionKey: string | null = null;
-        if (selectedIntervencaoHumano === 'demanda-telefone-fixo') {
-          subdivisionKey = 'demanda-telefone-fixo';
+        if (viewingIntervencaoHumana) {
+          const it = (conv as any)?.interventionType || (conv as any)?.attributionSource?.interventionType;
+          if (it) subdivisionKey = it;
         } else if (selectedSeller) {
           const subdivision = selectedSellerSubdivision || (conv as any)?.sellerSubdivision || 'pedidos-orcamentos';
           subdivisionKey = `seller-${selectedSeller}-${subdivision}`;
@@ -3190,6 +3488,8 @@ export const SupervisorDashboard: React.FC = () => {
           const att = (conv as any).attributionSource;
           if (att.interventionType === 'demanda-telefone-fixo') {
             subdivisionKey = 'demanda-telefone-fixo';
+          } else if (att.interventionType) {
+            subdivisionKey = att.interventionType;
           } else if (att.sellerId) {
             const subdivision = (conv as any)?.sellerSubdivision || 'pedidos-orcamentos';
             subdivisionKey = `seller-${att.sellerId}-${subdivision}`;
@@ -3334,7 +3634,8 @@ export const SupervisorDashboard: React.FC = () => {
           return prev;
         }
         const prevIds = new Set(prev.map((m) => m.id));
-        const olderOnly = response.messages.filter((m: Message) => !prevIds.has(m.id));
+        const visibleMessages = response.messages.filter((m: Message) => !isLegacyRelocationSystemMessage(m as any));
+        const olderOnly = visibleMessages.filter((m: Message) => !prevIds.has(m.id));
         const allMessages = [...olderOnly, ...prev];
         // Sort by metadata.sentAt (ISO timestamp) - CRITICAL for correct chronological order
         return allMessages.sort((a: Message, b: Message) => {
@@ -3691,6 +3992,47 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
+  const isOpenTreeActive =
+    (selectedAttendanceFilter === 'abertos' ||
+      selectedAttendanceFilter === 'nao-atribuidos' ||
+      viewingIntervencaoHumana ||
+      !!selectedServiceCategory) &&
+    !selectedFechadosFilter;
+  const isAiNodeActive =
+    selectedAttendanceFilter === 'nao-atribuidos' &&
+    selectedNaoAtribuidosFilter === 'todos' &&
+    !selectedFechadosFilter;
+  const isInterventionNodeActive = (viewingIntervencaoHumana || !!selectedServiceCategory) && !selectedFechadosFilter;
+  const isFirstBranchActive = isAiNodeActive || isInterventionNodeActive;
+  const firstBranchLineClass = isOpenTreeActive
+    ? 'border-sky-400 dark:border-sky-500'
+    : 'border-slate-200 dark:border-slate-700';
+  const firstBranchSymbolClass = isFirstBranchActive
+    ? 'text-sky-600 dark:text-sky-400'
+    : 'text-slate-300 dark:text-slate-600';
+  const secondBranchLineClass = selectedServiceCategory
+    ? 'border-sky-400 dark:border-sky-500'
+    : 'border-slate-200 dark:border-slate-700';
+  const isFechadosActive = selectedFechadosFilter;
+  const isFollowUpPathActive =
+    selectedFollowUpNode === 'follow-up' ||
+    selectedFollowUpNode === 'inativo-1h' ||
+    selectedFollowUpNode === 'inativo-12h' ||
+    selectedFollowUpNode === 'inativo-24h';
+  const isFollowUp1hPathActive =
+    selectedFollowUpNode === 'inativo-1h' ||
+    selectedFollowUpNode === 'inativo-12h' ||
+    selectedFollowUpNode === 'inativo-24h';
+  const isFollowUp12hPathActive =
+    selectedFollowUpNode === 'inativo-12h' ||
+    selectedFollowUpNode === 'inativo-24h';
+  const isFollowUp24hPathActive = selectedFollowUpNode === 'inativo-24h';
+  const closedTreeLineClass = selectedFollowUpNode
+    ? 'border-sky-400 dark:border-sky-500'
+    : 'border-slate-200 dark:border-slate-700';
+  const closedTreeSymbolDefault = 'text-slate-300 dark:text-slate-600';
+  const closedTreeSymbolActive = 'text-sky-600 dark:text-sky-400';
+
   return (
     <div className="flex h-screen overflow-hidden bg-slate-100 dark:bg-slate-950">
       {/* Sidebar Left - Icons */}
@@ -3708,7 +4050,7 @@ export const SupervisorDashboard: React.FC = () => {
                 >
                   <span className="material-icons-round text-white">bolt</span>
                 </div>
-                <span className="text-lg font-bold tracking-tight">ALTESE</span>
+                <span className="text-lg font-bold tracking-tight">Plataforma</span>
               </div>
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -3758,16 +4100,8 @@ export const SupervisorDashboard: React.FC = () => {
             <span className="material-icons-round">analytics</span>
             {sidebarOpen && <span className="text-sm">Estatísticas</span>}
           </button>
-          <button className={`p-2 hover:bg-white/10 rounded-lg transition-colors flex items-center ${sidebarOpen ? 'gap-3 w-full' : 'justify-center'}`}>
-            <span className="material-icons-round">people_outline</span>
-            {sidebarOpen && <span className="text-sm">Pessoas</span>}
-          </button>
         </nav>
         <div className={`mt-auto w-full ${sidebarOpen ? 'px-3' : 'px-0'}`}>
-          <button className={`p-2 hover:bg-white/10 rounded-lg transition-colors flex items-center ${sidebarOpen ? 'gap-3 w-full' : 'justify-center w-full'}`}>
-            <span className="material-icons-round">settings</span>
-            {sidebarOpen && <span className="text-sm">Configurações</span>}
-          </button>
           <button
             type="button"
             onClick={toggleTheme}
@@ -3787,7 +4121,6 @@ export const SupervisorDashboard: React.FC = () => {
               <div className="w-8 h-8 bg-primary rounded-full border-2 border-white flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style={{ backgroundColor: '#F07000' }}>
                 {user?.name?.charAt(0).toUpperCase() || 'U'}
               </div>
-              <span className="text-sm">Perfil</span>
             </button>
           )}
         </div>
@@ -3796,30 +4129,65 @@ export const SupervisorDashboard: React.FC = () => {
       {/* Entry/Marcas Panel */}
       {activeSupervisorTab === 'chat' && (
       <>
-      <div className={`${entryPanelHasScroll ? 'w-[272px]' : 'w-64'} border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col flex-shrink-0 transition-[width] duration-200 ease-out h-full min-h-0 dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200`}>
+      <div className={`${entryPanelHasScroll ? 'w-[304px]' : 'w-72'} border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col flex-shrink-0 transition-[width] duration-200 ease-out h-full min-h-0 dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200`}>
         <div className="p-5 flex justify-between items-center flex-shrink-0">
           <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">Entrada</h1>
         </div>
         <nav ref={entryNavRef} className="flex-grow overflow-y-auto px-2 custom-scrollbar scrollbar-left space-y-1 min-h-0">
           <div className="scrollbar-left-inner space-y-1 min-h-0">
           <div className="px-3 py-4 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Atendimentos</div>
-          <div className="mb-1">
-            <div className="flex items-stretch rounded-lg overflow-hidden">
+          <div className="mb-6 space-y-1">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedAttendanceFilter('abertos');
+                setViewingIntervencaoHumana(false);
+                setSelectedServiceCategory(null);
+                setSelectedConversation(null);
+                setSelectedNaoAtribuidosFilter('todos');
+                setSelectedFechadosFilter(false);
+                setSelectedFollowUpNode(null);
+                setSelectedTodasDemandasSubdivision(null);
+                setSelectedSeller(null);
+                setSelectedSellerBrand(null);
+              }}
+              className={`w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors min-w-0 ${
+                isOpenTreeActive
+                  ? 'bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-white font-medium'
+                  : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+              style={isOpenTreeActive ? selectedNavTextStyle : {}}
+            >
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">folder_open</span>
+                <div className="flex flex-col items-start min-w-0">
+                  <span className="truncate">Abertos</span>
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('abertos')} atendimentos abertos</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {totalUnreadAbertos > 0 && (
+                  <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>{totalUnreadAbertos > 99 ? '99+' : totalUnreadAbertos}</span>
+                )}
+              </div>
+            </button>
+            <div className={`ml-4 border-l pl-2 space-y-0.5 ${firstBranchLineClass}`}>
               <button
                 type="button"
                 onClick={handleSelectNaoAtribuidos}
-                className={`flex-1 flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-l-lg transition-colors min-w-0 ${
-                  selectedAttendanceFilter === 'nao-atribuidos'
+                className={`w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors min-w-0 ${
+                  selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos'
                     ? 'bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-white font-medium'
                     : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
-                style={selectedAttendanceFilter === 'nao-atribuidos' ? selectedNavTextStyle : {}}
+                style={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? selectedNavTextStyle : {}}
               >
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">person_off</span>
+                <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                  <span className={`font-mono text-xs ${isAiNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>├─</span>
+                  <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">smart_toy</span>
                   <div className="flex flex-col items-start min-w-0">
-                    <span className="truncate">Não Atribuídos</span>
-                    <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('todos')} atendimentos ativos</span>
+                    <span className="truncate">AI</span>
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('todos')} Atendimentos</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
@@ -3831,615 +4199,263 @@ export const SupervisorDashboard: React.FC = () => {
                   )}
                 </div>
               </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggleNaoAtribuidosDropdown();
-                }}
-                className={`flex items-center justify-center px-2 py-2 rounded-r-lg transition-colors border-l border-slate-200 dark:border-slate-600 ${
-                  expandedNaoAtribuidos
-                    ? 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200'
-                    : 'bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
-                }`}
-                title="Abrir subdivisões"
-              >
-                <span className={`material-icons-round text-sm transition-transform ${expandedNaoAtribuidos ? 'rotate-180' : ''}`}>
-                  keyboard_arrow_down
-                </span>
-              </button>
-            </div>
-            <div
-              className={`ml-4 mt-1 overflow-hidden transition-all duration-300 ease-in-out ${
-                expandedNaoAtribuidos ? 'max-h-64 overflow-y-auto opacity-100' : 'max-h-0 opacity-0'
-              }`}
-            >
-              <div className="space-y-1">
-                {[
-                  { key: 'triagem' as const, label: 'Triagem', icon: 'filter_list' },
-                  { key: 'encaminhados-ecommerce' as const, label: 'Encaminhados E-commerce', icon: 'shopping_cart' },
-                ].map((sub) => {
-                  const isSelected = selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === sub.key;
-                  const selectSub = () => {
+
+              {/* Intervenção humana - view que mostra todas as intervenções com badge do serviço em cada card */}
+              <div className="space-y-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setViewingIntervencaoHumana(true);
+                    setSelectedServiceCategory(null);
                     setSelectedConversation(null);
+                    setSelectedAttendanceFilter('tudo');
+                    setSelectedFechadosFilter(false);
+                    setSelectedFollowUpNode(null);
+                    setSelectedTodasDemandasSubdivision(null);
                     setSelectedSeller(null);
                     setSelectedSellerBrand(null);
-                    setSelectedIntervencaoHumano(null);
-                    setSelectedAttendanceFilter('nao-atribuidos');
-                    setSelectedNaoAtribuidosFilter(sub.key);
-                  };
-                  return (
-                    <button
-                      key={sub.key}
-                      onClick={selectSub}
-                      title={sub.label}
-                      className={`w-full flex items-center space-x-2.5 px-2.5 py-1.5 text-xs rounded-md transition-colors text-left min-w-0 ${
-                        isSelected
-                          ? 'bg-slate-50 dark:bg-slate-800 text-navy dark:text-white font-medium'
-                          : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-                      }`}
-                      style={isSelected ? selectedNavTextStyle : {}}
-                    >
-                      <span className="material-icons-round text-base text-slate-400 flex-shrink-0">{sub.icon}</span>
-                      <div className="flex flex-col items-start min-w-0 flex-1">
-                        <span className="truncate w-full">{sub.label}</span>
-                        <span className="text-[9px] text-slate-500 dark:text-slate-400">{getActiveCount(sub.key)} atendimentos ativos</span>
-                      </div>
-                    </button>
-                  );
-                })}
+                  }}
+                  className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors ${
+                    viewingIntervencaoHumana
+                      ? 'bg-slate-50 dark:bg-slate-800 text-navy dark:text-white font-medium'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                  style={viewingIntervencaoHumana ? selectedNavTextStyle : {}}
+                >
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                    <span className={`font-mono text-xs ${isInterventionNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>└─</span>
+                    <span className="material-icons-round text-lg flex-shrink-0">engineering</span>
+                    <div className="flex flex-col items-start min-w-0">
+                      <span>Intervenção Humana</span>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('demanda-telefone-fixo') + getActiveCount('protese-capilar') + getActiveCount('outros-assuntos')} Atendimentos</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {getRedBadgeDivision('intervencao-humana') > 0 && (
+                      <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
+                    )}
+                    {(getSubdivisionBadge('demanda-telefone-fixo') + getSubdivisionBadge('protese-capilar') + getSubdivisionBadge('outros-assuntos')) > 0 && (
+                      <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>
+                        {getSubdivisionBadge('demanda-telefone-fixo') + getSubdivisionBadge('protese-capilar') + getSubdivisionBadge('outros-assuntos')}
+                      </span>
+                    )}
+                  </div>
+                </button>
+
+                <div className={`ml-4 border-l pl-2 space-y-0.5 ${secondBranchLineClass}`}>
+                  {SERVICE_CATEGORIES.map(({ key, label, icon }, idx) => {
+                    const sellers = getSellersByServiceCategory(key);
+                    const sellersActiveCount = sellers.reduce((sum, s) => sum + (getActiveCount(`seller-${s.id}`) || 0), 0);
+                    const types = SERVICE_TO_INTERVENTION[key];
+                    const interventionActiveCount = Array.isArray(types)
+                      ? types.reduce((sum, t) => sum + (getActiveCount(t) || 0), 0)
+                      : (getActiveCount(types) || 0);
+                    const activeCount = sellersActiveCount + interventionActiveCount;
+                    const isSelected = selectedServiceCategory === key;
+                    const branch = idx < SERVICE_CATEGORIES.length - 1 ? '├─' : '└─';
+                    const serviceBranchClass = isSelected ? 'text-sky-600 dark:text-sky-400' : 'text-slate-300 dark:text-slate-600';
+
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => handleSelectServiceCategory(key)}
+                        className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors ${
+                          isSelected
+                            ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
+                            : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                          <span className={`font-mono text-xs ${serviceBranchClass}`}>{branch}</span>
+                          <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">{icon}</span>
+                          <div className="flex flex-col items-start min-w-0">
+                            <span>{label}</span>
+                            <span className="text-[10px] text-slate-500 dark:text-slate-400">{activeCount} Atendimentos</span>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="ml-3 mt-0.5">
+                  <div className="space-y-1">
+                    {(() => {
+                      const relocationNotifs = (notifications || []).filter(
+                        (n) => n.type === 'ATTENDANCE_RELOCATED_INTERVENTION' && !n.isRead
+                      );
+                      if (relocationNotifs.length === 0) return null;
+                      return (
+                        <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                          <div className="px-2 pb-1.5 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+                            Realocadas
+                          </div>
+                          {relocationNotifs.map((n) => (
+                            <button
+                              key={n.id}
+                              onClick={async () => {
+                                if (!n.attendanceId) return;
+                                setViewingIntervencaoHumana(true);
+                                setSelectedServiceCategory(null);
+                                setSelectedSeller(null);
+                                setSelectedSellerBrand(null);
+                                setSelectedTodasDemandasSubdivision(null);
+                                setSelectedDemandaKey(null);
+                                setSelectedAttendanceFilter('tudo');
+                                await fetchAllInterventionConversations();
+                                setSelectedConversation(n.attendanceId);
+                                await markRelocationAsReadByAttendance(n.attendanceId);
+                              }}
+                              className="w-full flex items-center space-x-2 px-3 py-2 text-left rounded-lg bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
+                            >
+                              <span className="material-icons-round text-amber-600 dark:text-amber-400 text-sm">swap_horiz</span>
+                              <span className="text-xs text-slate-700 dark:text-slate-200 truncate flex-1">{n.title}</span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
+
+          <div className="pt-6 mb-4">
+            <div className="border-t border-slate-200 dark:border-slate-700" />
+          </div>
+
+          {/* Follow up - raiz da árvore */}
           <button
-            onClick={() => {
-              setSelectedConversation(null);
-              setSelectedSeller(null);
-              setSelectedSellerBrand(null);
-              setSelectedIntervencaoHumano(null);
-              setSelectedIntervencaoHumanoSubdivision(null);
-              setSelectedTodasDemandasSubdivision(null);
-              setSelectedDemandaKey(null);
-              setSelectedFechadosFilter(false);
-              setSelectedAttendanceFilter('tudo');
-              setPendingQuotes([]);
-            }}
+            type="button"
+            onClick={() => handleSelectFollowUpNode('follow-up')}
             className={`w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg transition-colors ${
-              selectedAttendanceFilter === 'tudo' && !selectedIntervencaoHumano && !selectedIntervencaoHumanoSubdivision && !selectedTodasDemandasSubdivision && !selectedFechadosFilter && selectedDemandaKey === null
-                ? 'bg-slate-50 dark:bg-slate-800 text-navy dark:text-white font-medium'
-                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+              selectedFollowUpNode === 'follow-up'
+                ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
             }`}
-            style={selectedAttendanceFilter === 'tudo' && !selectedIntervencaoHumano && !selectedIntervencaoHumanoSubdivision && !selectedTodasDemandasSubdivision && !selectedFechadosFilter && selectedDemandaKey === null ? selectedNavTextStyle : {}}
+            style={selectedFollowUpNode === 'follow-up' ? selectedNavTextStyle : {}}
           >
-            <div className="flex items-center space-x-3 min-w-0 flex-1">
-              <span className="material-icons-round text-lg text-slate-400 flex-shrink-0">apps</span>
-              <div className="flex flex-col items-start min-w-0">
-                <span>Atribuídos</span>
-                <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('attributed')} atendimentos ativos</span>
+            <div className="flex flex-col items-start min-w-0 flex-1">
+              <div className="flex items-center gap-2 w-full">
+                <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">schedule</span>
+                <span className="truncate">Follow up</span>
               </div>
-            </div>
-            <div className="flex items-center gap-1 flex-shrink-0">
-              {getRedBadgeDivision('attributed') > 0 && (
-                <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-              )}
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 ml-6">
+                {activeCountBySubdivision['follow-up'] ?? 0} Atendimentos em follow up
+              </span>
             </div>
           </button>
 
-          {/* Intervenção humana */}
-          <div className="mb-1">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedIntervencaoHumano('demanda-telefone-fixo');
-                setSelectedIntervencaoHumanoSubdivision(null);
-                setSelectedConversation(null);
-                setSelectedSeller(null);
-                setSelectedSellerBrand(null);
-                setSelectedTodasDemandasSubdivision(null);
-                setSelectedDemandaKey(null);
-                setSelectedAttendanceFilter('tudo');
-                setSelectedNaoAtribuidosFilter('todos');
-                setSelectedFechadosFilter(false);
-                setPendingQuotes([]);
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors ${
-                selectedIntervencaoHumano === 'demanda-telefone-fixo'
-                  ? 'bg-slate-50 dark:bg-slate-800 text-navy dark:text-white font-medium'
-                  : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-              }`}
-              style={selectedIntervencaoHumano === 'demanda-telefone-fixo' ? selectedNavTextStyle : {}}
-            >
-              <div className="flex items-center space-x-3 min-w-0 flex-1">
-                <span className="material-icons-round text-lg flex-shrink-0">engineering</span>
+          <div className={`ml-4 border-l pl-2 space-y-0.5 ${closedTreeLineClass}`}>
+              <button
+                type="button"
+                onClick={() => handleSelectFollowUpNode('inativo-1h')}
+                className={`w-full px-3 py-2 text-sm rounded-lg transition-colors text-left ${
+                  selectedFollowUpNode === 'inativo-1h'
+                    ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                }`}
+                style={selectedFollowUpNode === 'inativo-1h' ? selectedNavTextStyle : {}}
+              >
                 <div className="flex flex-col items-start min-w-0">
-                  <span>Intervenção humana</span>
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('demanda-telefone-fixo') + getActiveCount('garantia') + getActiveCount('troca') + getActiveCount('estorno')} atendimentos ativos</span>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className={`font-mono text-xs ${isFollowUp1hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
+                    <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">hourglass_top</span>
+                    <span className="truncate">Inativo a mais de 1 hora</span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
+                    {activeCountBySubdivision['inativo-1h'] ?? 0} Atendimentos nessa fase
+                  </span>
+                </div>
+              </button>
+
+              <div className={`ml-4 border-l pl-2 space-y-0.5 ${isFollowUp1hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
+                <button
+                  type="button"
+                  onClick={() => handleSelectFollowUpNode('inativo-12h')}
+                  className={`w-full px-3 py-2 text-sm rounded-lg transition-colors text-left ${
+                    selectedFollowUpNode === 'inativo-12h'
+                      ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                  style={selectedFollowUpNode === 'inativo-12h' ? selectedNavTextStyle : {}}
+                >
+                  <div className="flex flex-col items-start min-w-0">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className={`font-mono text-xs ${isFollowUp12hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
+                      <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">update</span>
+                      <span className="truncate">Inativo +12h</span>
+                    </div>
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
+                      {activeCountBySubdivision['inativo-12h'] ?? 0} Atendimentos nessa fase
+                    </span>
+                  </div>
+                </button>
+
+                <div className={`ml-4 border-l pl-2 ${isFollowUp12hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectFollowUpNode('inativo-24h')}
+                    className={`w-full px-3 py-2 text-sm rounded-lg transition-colors text-left ${
+                      selectedFollowUpNode === 'inativo-24h'
+                        ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                        : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    }`}
+                    style={selectedFollowUpNode === 'inativo-24h' ? selectedNavTextStyle : {}}
+                  >
+                    <div className="flex flex-col items-start min-w-0">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className={`font-mono text-xs ${isFollowUp24hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
+                        <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">timer</span>
+                        <span className="truncate">Inativo 24+h</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
+                        {activeCountBySubdivision['inativo-24h'] ?? 0} Atendimentos nessa fase
+                      </span>
+                    </div>
+                  </button>
                 </div>
               </div>
-              <div className="flex items-center gap-1 flex-shrink-0">
-                {getRedBadgeDivision('intervencao-humana') > 0 && (
-                  <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-                )}
-                {getSubdivisionBadge('demanda-telefone-fixo') > 0 && (
-                  <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>
-                    {getSubdivisionBadge('demanda-telefone-fixo')}
-                  </span>
-                )}
-              </div>
-            </button>
-            <div className="ml-4 mt-1">
-              <div className="space-y-1">
-                {(() => {
-                  const relocationNotifs = (notifications || []).filter(
-                    (n) => n.type === 'ATTENDANCE_RELOCATED_INTERVENTION' && !n.isRead
-                  );
-                  if (relocationNotifs.length === 0) return null;
-                  return (
-                    <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-                      <div className="px-2 pb-1.5 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-                        Realocadas
-                      </div>
-                      {relocationNotifs.map((n) => (
-                        <button
-                          key={n.id}
-                          onClick={async () => {
-                            if (!n.attendanceId) return;
-                            setSelectedIntervencaoHumano('demanda-telefone-fixo');
-                            setSelectedSeller(null);
-                            setSelectedSellerBrand(null);
-                            setSelectedTodasDemandasSubdivision(null);
-                            setSelectedDemandaKey(null);
-                            setSelectedAttendanceFilter('tudo');
-                            const list = await attendanceService.getInterventionDemandaTelefoneFixo();
-                            setConversations(list);
-                            setSelectedConversation(n.attendanceId);
-                            await markRelocationAsReadByAttendance(n.attendanceId);
-                          }}
-                          className="w-full flex items-center space-x-2 px-3 py-2 text-left rounded-lg bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
-                        >
-                          <span className="material-icons-round text-amber-600 dark:text-amber-400 text-sm">swap_horiz</span>
-                          <span className="text-xs text-slate-700 dark:text-slate-200 truncate flex-1">{n.title}</span>
-                        </button>
-                      ))}
-                    </div>
-                  );
-                })()}
-              </div>
             </div>
+
+          <div className="pt-6 mb-4">
+            <div className="border-t border-slate-200 dark:border-slate-700" />
           </div>
 
-          {/* Fechados */}
+          {/* Fechados - fora da árvore */}
           <button
             onClick={() => {
               setSelectedConversation(null);
               setSelectedSeller(null);
               setSelectedSellerBrand(null);
-              setSelectedIntervencaoHumano(null);
-              setSelectedIntervencaoHumanoSubdivision(null);
+              setSelectedServiceCategory(null);
+              setViewingIntervencaoHumana(false);
               setSelectedTodasDemandasSubdivision(null);
               setSelectedDemandaKey(null);
               setSelectedAttendanceFilter('tudo');
-              setExpandedNaoAtribuidos(false);
-              setExpandedIntervencaoHumano(false);
               setExpandedTodasDemandas(false);
               setSelectedFechadosFilter(true);
+              setSelectedFollowUpNode(null);
               setPendingQuotes([]);
             }}
-            className={`w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg transition-colors ${
-              selectedFechadosFilter
+            className={`w-full flex items-center justify-center px-3 py-2 text-sm rounded-lg transition-colors ${
+              isFechadosActive
                 ? 'bg-slate-50 dark:bg-slate-800 text-navy dark:text-white font-medium'
                 : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
             }`}
-            style={selectedFechadosFilter ? selectedNavTextStyle : {}}
+            style={isFechadosActive ? selectedNavTextStyle : {}}
           >
-            <div className="flex items-center space-x-3 min-w-0 flex-1">
+            <div className="flex items-center gap-2">
               <span className="material-icons-round text-lg text-slate-400 flex-shrink-0">archive</span>
-              <div className="flex flex-col items-start min-w-0">
+              <div className="flex flex-col items-center">
                 <span>Fechados</span>
                 <span className="text-[10px] text-slate-500 dark:text-slate-400">{activeCountBySubdivision['fechados'] ?? 0} atendimentos</span>
               </div>
             </div>
           </button>
 
-          <div className="px-3 py-4 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Todas as demandas dos vendedores</div>
-
-          <div className="mb-1">
-            <div className="flex items-stretch rounded-lg overflow-hidden">
-              <button
-                type="button"
-                onClick={handleSelectTodasDemandasMain}
-                className={`flex-1 flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-l-lg transition-colors min-w-0 ${
-                  selectedTodasDemandasSubdivision === '__all__'
-                    ? 'bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-white font-medium'
-                    : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-                }`}
-              >
-                <div className="flex items-center space-x-3 min-w-0 flex-1">
-                  <span className="material-icons-round text-base flex-shrink-0">group</span>
-                  <div className="flex flex-col items-start min-w-0">
-                    <span className="truncate">Todas as Demandas</span>
-                    <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('todas-demandas-total')} {getActiveCount('todas-demandas-total') === 1 ? 'pendência' : 'pendências'}</span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  {(() => {
-                    const subs = ['pedidos-orcamentos', 'perguntas-pos-orcamento', 'confirmacao-pix', 'tirar-pedido', 'informacoes-entrega', 'encomendas', 'cliente-pediu-humano'];
-                    const subsSemPedidosOrcamentos = subs.filter((k) => k !== 'pedidos-orcamentos');
-                    const totalRed = supervisorSellers.reduce((sum, s) => sum + subs.reduce((s2, k) => s2 + (getRedBadgeSubdivision(`seller-${s.id}-${k}`) || 0), 0), 0);
-                    const totalBlue = supervisorSellers.reduce((sum, s) => sum + subsSemPedidosOrcamentos.reduce((s2, k) => s2 + (getSubdivisionBadge(`seller-${s.id}-${k}`) || 0), 0), 0);
-                    return (
-                      <>
-                        {unviewedQuoteCountTotal > 0 && (
-                          <span className="w-5 h-5 rounded-full bg-green-500 text-white text-[10px] font-semibold flex items-center justify-center" title={`${unviewedQuoteCountTotal} orçamento(s) pendente(s) não visualizado(s)`}>
-                            {unviewedQuoteCountTotal > 99 ? '99+' : unviewedQuoteCountTotal}
-                          </span>
-                        )}
-                        {totalRed > 0 && (
-                          <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-                        )}
-                        {totalBlue > 0 && (
-                          <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>{totalBlue > 99 ? '99+' : totalBlue}</span>
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); toggleTodasDemandas(); }}
-                className={`flex items-center justify-center px-2 py-2 rounded-r-lg transition-colors border-l border-slate-200 dark:border-slate-600 ${
-                  expandedTodasDemandas
-                    ? 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200'
-                    : 'bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
-                }`}
-                title="Abrir subdivisões"
-              >
-                <span className={`material-icons-round text-sm transition-transform ${expandedTodasDemandas ? 'rotate-180' : ''}`}>
-                  keyboard_arrow_down
-                </span>
-              </button>
-            </div>
-            <div
-              className={`ml-4 mt-1 transition-all duration-300 ease-in-out ${
-                expandedTodasDemandas ? 'max-h-[420px] overflow-y-auto opacity-100' : 'max-h-0 overflow-hidden opacity-0'
-              }`}
-            >
-              <div className="space-y-1">
-                {[
-                  { key: 'pedidos-orcamentos', label: 'Pedidos de Orçamentos', icon: 'description' },
-                  { key: 'perguntas-pos-orcamento', label: 'Perguntas Pós Orçamento', icon: 'help_outline' },
-                  { key: 'confirmacao-pix', label: 'Confirmação Pix', icon: 'payments' },
-                  { key: 'tirar-pedido', label: 'Tirar Pedido', icon: 'shopping_cart' },
-                  { key: 'informacoes-entrega', label: 'Informações sobre Entrega', icon: 'local_shipping' },
-                  { key: 'encomendas', label: 'Encomendas', icon: 'inventory' },
-                  { key: 'cliente-pediu-humano', label: 'Cliente pediu Humano', icon: 'support_agent' },
-                ].map((sub) => {
-                  const isComingSoon = sub.key !== 'pedidos-orcamentos';
-                  const activeCount = sub.key === 'pedidos-orcamentos'
-                    ? (getActiveCount('pedidos-orcamentos') || 0)
-                    : supervisorSellers.reduce((sum, s) => sum + (getActiveCount(`seller-${s.id}-${sub.key}`) || 0), 0);
-                  const blueBadge = sub.key === 'pedidos-orcamentos'
-                    ? 0
-                    : supervisorSellers.reduce((sum, s) => sum + (getSubdivisionBadge(`seller-${s.id}-${sub.key}`) || 0), 0);
-                  const redBadge = supervisorSellers.reduce((sum, s) => sum + (getRedBadgeSubdivision(`seller-${s.id}-${sub.key}`) || 0), 0);
-                  return (
-                    <button
-                      key={sub.key}
-                      onClick={() => !isComingSoon && handleSelectTodasDemandasSubdivision(sub.key)}
-                      className={`w-full flex items-center justify-between space-x-3 px-3 py-2 text-xs text-left rounded-lg transition-colors ${isComingSoon ? 'opacity-50 cursor-default' : ''} ${
-                        selectedTodasDemandasSubdivision === sub.key
-                          ? 'bg-slate-200 dark:bg-slate-600 text-slate-900 dark:text-white font-medium'
-                          : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        <span className="material-icons-round text-sm flex-shrink-0 text-slate-600 dark:text-slate-400">{sub.icon}</span>
-                        <div className="flex flex-col items-start min-w-0">
-                          <span className="truncate">{sub.label}</span>
-                          <span className="text-[10px] text-slate-500 dark:text-slate-400">{isComingSoon ? 'Em breve' : sub.key === 'pedidos-orcamentos' ? `${activeCount} ${activeCount === 1 ? 'orçamento pendente' : 'orçamentos pendentes'}` : `${activeCount} ${activeCount === 1 ? 'pendência' : 'pendências'}`}</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-                        {sub.key === 'pedidos-orcamentos' && unviewedQuoteCountTotal > 0 && (
-                          <span className="w-4 h-4 rounded-full bg-green-500 text-white text-[9px] font-semibold flex items-center justify-center flex-shrink-0" title={`${unviewedQuoteCountTotal} não visualizado(s)`}>
-                            {unviewedQuoteCountTotal > 99 ? '99+' : unviewedQuoteCountTotal}
-                          </span>
-                        )}
-                        {redBadge > 0 && (
-                          <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-                        )}
-                        {sub.key !== 'pedidos-orcamentos' && blueBadge > 0 && (
-                          <span className="bg-navy text-white text-[10px] font-semibold px-1.5 py-0.5 rounded-full min-w-[18px] text-center" style={{ backgroundColor: '#003070' }}>{blueBadge > 99 ? '99+' : blueBadge}</span>
-                        )}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          <div className="px-3 py-4 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Marcas</div>
-          
-          {supervisorBrands.map((brand) => {
-            const sellers = getSellersByBrand(brand);
-            const isExpanded = expandedBrands[brand] || false;
-            const sellerSubdivisions = ['pedidos-orcamentos', 'perguntas-pos-orcamento', 'confirmacao-pix', 'tirar-pedido', 'informacoes-entrega', 'encomendas', 'cliente-pediu-humano'];
-            // Atendimentos ativos = conversas atribuídas ao vendedor (backend envia seller-{id})
-            const brandActiveCount = sellers.reduce((sum, s) => sum + (getActiveCount(`seller-${s.id}`) || 0), 0);
-            const brandBlueBadge = sellers.reduce((sum, s) => {
-              const subsSemPedidosOrcamentos = sellerSubdivisions.filter((sub) => sub !== 'pedidos-orcamentos');
-              const sellerTotal = subsSemPedidosOrcamentos.reduce((subSum, sub) => subSum + (getSubdivisionBadge(`seller-${s.id}-${sub}`) || 0), 0);
-              return sum + sellerTotal;
-            }, 0);
-            const brandRedBadge = sellers.reduce((sum, s) => {
-              const sellerTotal = sellerSubdivisions.reduce((subSum, sub) => subSum + (getRedBadgeSubdivision(`seller-${s.id}-${sub}`) || 0), 0);
-              return sum + sellerTotal;
-            }, 0);
-            
-            return (
-              <div key={brand} className="mb-1 relative isolate">
-                <button
-                  type="button"
-                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleBrand(brand); }}
-                  className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors ${
-                    isExpanded
-                      ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <span className="material-icons-round text-lg flex-shrink-0 text-slate-600 dark:text-slate-400">directions_car</span>
-                    <div className="flex flex-col items-start min-w-0">
-                      <span>{getBrandLabel(brand)}</span>
-                      <span className="text-[10px] text-slate-500 dark:text-slate-400">{brandActiveCount} atendimentos ativos</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    {(() => {
-                      const brandGreenBadge = sellers.reduce((sum, s) => sum + getUnviewedQuoteCountForSeller(s.id), 0);
-                      return brandGreenBadge > 0 ? (
-                        <span className="w-5 h-5 rounded-full bg-green-500 text-white text-[10px] font-semibold flex items-center justify-center" title={`${brandGreenBadge} orçamento(s) pendente(s) não visualizado(s)`}>
-                          {brandGreenBadge > 99 ? '99+' : brandGreenBadge}
-                        </span>
-                      ) : null;
-                    })()}
-                    {brandRedBadge > 0 && (
-                      <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-                    )}
-                    {brandBlueBadge > 0 && (
-                      <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>
-                        {brandBlueBadge > 99 ? '99+' : brandBlueBadge}
-                      </span>
-                    )}
-                    <span className={`material-icons-round text-sm transition-transform ${isExpanded ? 'rotate-180' : ''}`}>
-                      keyboard_arrow_down
-                    </span>
-                  </div>
-                </button>
-                
-                <div
-                  className={`ml-4 mt-1 overflow-x-hidden overflow-y-visible transition-[max-height,opacity] duration-300 ease-in-out ${
-                    isExpanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 overflow-y-hidden opacity-0'
-                  }`}
-                >
-                  {sellers.length > 0 ? (
-                    <div className="space-y-1">
-                      {sellers.map((seller) => {
-                        const isSellerExpanded = expandedSellers[seller.id] || false;
-                        const subdivisions = [
-                          { key: 'pedidos-orcamentos', label: 'Pedidos de Orçamentos', icon: 'description' },
-                          { key: 'perguntas-pos-orcamento', label: 'Perguntas Pós Orçamento', icon: 'help_outline' },
-                          { key: 'confirmacao-pix', label: 'Confirmação Pix', icon: 'payments' },
-                          { key: 'tirar-pedido', label: 'Tirar Pedido', icon: 'shopping_cart' },
-                          { key: 'informacoes-entrega', label: 'Informações sobre Entrega', icon: 'local_shipping' },
-                          { key: 'encomendas', label: 'Encomendas', icon: 'inventory' },
-                          { key: 'cliente-pediu-humano', label: 'Cliente pediu Humano', icon: 'support_agent' },
-                        ];
-                        // Atendimentos ativos = conversas atribuídas ao vendedor (backend envia seller-{id})
-                        const sellerActiveCount = getActiveCount(`seller-${seller.id}`) || 0;
-                        const sellerBlueBadge = subdivisions.filter((sub) => sub.key !== 'pedidos-orcamentos').reduce((sum, sub) => sum + (getSubdivisionBadge(`seller-${seller.id}-${sub.key}`) || 0), 0);
-                        const sellerRedBadge = subdivisions.reduce((sum, sub) => sum + (getRedBadgeSubdivision(`seller-${seller.id}-${sub.key}`) || 0), 0);
-
-                        const isSellerSelected = selectedSeller === seller.id && !selectedSellerSubdivision;
-                        const isSellerUnavailable = isSellerCurrentlyUnavailable(seller);
-                        const isLongSellerName = seller.name.length > 18;
-                        const isUpdatingSellerAvailability = !!updatingSellerAvailabilityIds[seller.id];
-                        return (
-                          <div key={seller.id} className="relative">
-                            <button
-                              type="button"
-                              onClick={() => handleSelectSeller(seller.id, undefined, brand)}
-                              className={`w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors min-w-0 ${
-                                isSellerSelected
-                                  ? 'bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-white font-medium'
-                                  : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">person</span>
-                                <div className="flex flex-col items-start min-w-0">
-                                  <span className={`truncate ${isLongSellerName ? 'text-[13px]' : ''}`}>{seller.name}</span>
-                                  <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                                    {isSellerUnavailable && seller.unavailableUntil
-                                      ? `Ausente ate ${new Date(seller.unavailableUntil).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
-                                      : `${sellerActiveCount} atendimentos ativos`}
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-1 flex-shrink-0">
-                                {getUnviewedQuoteCountForSeller(seller.id) > 0 && (
-                                  <span className="w-5 h-5 rounded-full bg-green-500 text-white text-[10px] font-semibold flex items-center justify-center" title={`${getUnviewedQuoteCountForSeller(seller.id)} orçamento(s) pendente(s) não visualizado(s)`}>
-                                    {getUnviewedQuoteCountForSeller(seller.id) > 99 ? '99+' : getUnviewedQuoteCountForSeller(seller.id)}
-                                  </span>
-                                )}
-                                {sellerRedBadge > 0 && (
-                                  <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-                                )}
-                                {sellerBlueBadge > 0 && (
-                                  <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>{sellerBlueBadge > 99 ? '99+' : sellerBlueBadge}</span>
-                                )}
-                              </div>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleSeller(seller.id);
-                              }}
-                              className={`absolute inset-y-0 right-0 flex items-center justify-center px-2 transition-colors ${
-                                isSellerExpanded
-                                  ? 'text-slate-700 dark:text-slate-200'
-                                  : 'text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300'
-                              }`}
-                              title="Abrir subdivisões"
-                            >
-                              <span className={`material-icons-round text-sm transition-transform ${isSellerExpanded ? 'rotate-180' : ''}`}>
-                                keyboard_arrow_down
-                              </span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void handleToggleSellerAvailability(seller);
-                              }}
-                              disabled={isUpdatingSellerAvailability}
-                              className="absolute top-2 right-8 group disabled:opacity-50"
-                              title={isSellerUnavailable ? 'Marcar vendedor como presente' : 'Marcar vendedor como ausente por 2 horas'}
-                            >
-                              <span
-                                className={`inline-flex items-center gap-1 rounded-full text-[10px] font-medium shadow-sm transition-all duration-150 ${
-                                  isSellerUnavailable
-                                    ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-                                    : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-                                } px-1 group-hover:px-2`}
-                              >
-                                <span className="w-2.5 h-2.5 rounded-full bg-current" />
-                                <span className="max-w-0 overflow-hidden opacity-0 group-hover:max-w-xs group-hover:opacity-100 group-hover:ml-1 transition-all duration-150">
-                                  {isUpdatingSellerAvailability
-                                    ? '...'
-                                    : isSellerUnavailable
-                                      ? 'Está ausente'
-                                      : 'Está presente'}
-                                </span>
-                              </span>
-                            </button>
-                            <div
-                              className={`ml-4 mt-1 overflow-x-hidden overflow-y-visible transition-[max-height,opacity] duration-300 ease-in-out ${
-                                isSellerExpanded ? 'max-h-[1200px] opacity-100' : 'max-h-0 overflow-y-hidden opacity-0'
-                              }`}
-                            >
-                              <div className="space-y-1">
-                                {/* Dropdown "Demandas" dentro do vendedor: só os botões do card abrem/fecham */}
-                                <div className="mb-1" onClick={(e) => e.stopPropagation()}>
-                                  <div className="flex items-stretch rounded-lg overflow-hidden">
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleSelectSeller(seller.id, 'pedidos-orcamentos', brand, true);
-                                      }}
-                                      className={`flex-1 flex items-center space-x-2.5 px-3.5 py-2.5 text-sm text-left rounded-l-lg transition-colors min-w-0 ${
-                                        selectedSeller === seller.id && selectedSellerSubdivision === 'pedidos-orcamentos'
-                                          ? 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200'
-                                          : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-                                      }`}
-                                      title="Exibir todas as demandas deste vendedor (pedidos de orçamento, etc.)"
-                                    >
-                                      <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">assignment</span>
-                                      <span className="truncate font-medium">Demandas</span>
-                                      {getUnviewedQuoteCountForSeller(seller.id) > 0 && (
-                                        <span className="w-4 h-4 rounded-full bg-green-500 text-white text-[9px] font-semibold flex items-center justify-center flex-shrink-0 ml-2" title={`${getUnviewedQuoteCountForSeller(seller.id)} orçamento(s) pendente(s) não visualizado(s)`}>
-                                          {getUnviewedQuoteCountForSeller(seller.id) > 99 ? '99+' : getUnviewedQuoteCountForSeller(seller.id)}
-                                        </span>
-                                      )}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setExpandedDemandasBySeller((prev) => ({ ...prev, [seller.id]: !prev[seller.id] }));
-                                      }}
-                                      className={`flex items-center justify-center px-2.5 py-2.5 rounded-r-lg transition-colors border-l border-slate-200 dark:border-slate-600 ${
-                                        expandedDemandasBySeller[seller.id]
-                                          ? 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200'
-                                          : 'bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
-                                      }`}
-                                      title="Exibir tipos de demandas"
-                                    >
-                                      <span className={`material-icons-round text-sm transition-transform ${expandedDemandasBySeller[seller.id] ? 'rotate-180' : ''}`}>
-                                        keyboard_arrow_down
-                                      </span>
-                                    </button>
-                                  </div>
-                                  <div
-                                    className={`ml-3 mt-1 overflow-x-hidden overflow-y-visible transition-[max-height,opacity] duration-300 ease-in-out ${
-                                      expandedDemandasBySeller[seller.id] ? 'max-h-[800px] opacity-100' : 'max-h-0 overflow-y-hidden opacity-0'
-                                    }`}
-                                  >
-                                    <div className="space-y-1" onClick={(e) => e.stopPropagation()}>
-                                      {subdivisions.map((sub) => {
-                                        const isComingSoon = sub.key !== 'pedidos-orcamentos';
-                                        const subKey = `seller-${seller.id}-${sub.key}`;
-                                        const activeCount = getActiveCount(subKey);
-                                        const blueBadge = getSubdivisionBadge(subKey);
-                                        const redBadge = getRedBadgeSubdivision(subKey);
-                                        return (
-                                          <button
-                                            key={sub.key}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              if (!isComingSoon) handleSelectSeller(seller.id, sub.key, brand);
-                                            }}
-                                            className={`w-full flex items-center justify-between space-x-3 px-3 py-2 text-xs text-left rounded-lg transition-colors ${isComingSoon ? 'opacity-50 cursor-default' : ''} ${
-                                              selectedSeller === seller.id && selectedSellerSubdivision === sub.key
-                                                ? 'bg-slate-200 dark:bg-slate-600 text-slate-900 dark:text-white font-medium'
-                                                : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
-                                            }`}
-                                          >
-                                            <div className="flex items-center gap-2 min-w-0 flex-1">
-                                              <span className="material-icons-round text-sm flex-shrink-0 text-slate-600 dark:text-slate-400">{sub.icon}</span>
-                                              <div className="flex flex-col items-start min-w-0">
-                                                <span className="truncate">{sub.label}</span>
-                                                <span className="text-[10px] text-slate-500 dark:text-slate-400">{isComingSoon ? 'Em breve' : sub.key === 'pedidos-orcamentos' ? `${activeCount} ${activeCount === 1 ? 'orçamento pendente' : 'orçamentos pendentes'}` : `${activeCount} atendimentos ativos`}</span>
-                                              </div>
-                                            </div>
-                                            <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-                                              {sub.key === 'pedidos-orcamentos' && getUnviewedQuoteCountForSeller(seller.id) > 0 && (
-                                                <span className="w-4 h-4 rounded-full bg-green-500 text-white text-[9px] font-semibold flex items-center justify-center flex-shrink-0" title={`${getUnviewedQuoteCountForSeller(seller.id)} não visualizado(s)`}>
-                                                  {getUnviewedQuoteCountForSeller(seller.id) > 99 ? '99+' : getUnviewedQuoteCountForSeller(seller.id)}
-                                                </span>
-                                              )}
-                                              {redBadge > 0 && (
-                                                <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-                                              )}
-                                              {sub.key !== 'pedidos-orcamentos' && blueBadge > 0 && (
-                                                <span className="bg-navy text-white text-[10px] font-semibold px-1.5 py-0.5 rounded-full min-w-[18px] text-center" style={{ backgroundColor: '#003070' }}>{blueBadge > 99 ? '99+' : blueBadge}</span>
-                                              )}
-                                            </div>
-                                          </button>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="px-3 py-2 text-xs text-slate-400 dark:text-slate-500 italic pointer-events-auto">
-                      Nenhum vendedor desta marca atribuído a você. No painel Super Admin, defina a marca do vendedor e atribua-o ao seu supervisor.
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
           </div>
         </nav>
       </div>
@@ -4723,7 +4739,7 @@ export const SupervisorDashboard: React.FC = () => {
               <span className="material-icons-round animate-spin text-slate-400">refresh</span>
               <span className="ml-2 text-sm text-slate-400">Carregando conversas...</span>
             </div>
-          ) : (selectedSeller || selectedIntervencaoHumanoSubdivision || selectedAttendanceFilter === 'nao-atribuidos' || selectedIntervencaoHumano === 'demanda-telefone-fixo' || (selectedAttendanceFilter === 'tudo' && !selectedIntervencaoHumano)) && conversations.length > 0 ? (
+          ) : (selectedSeller || selectedServiceCategory || (viewingIntervencaoHumana && !selectedServiceCategory) || selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'nao-atribuidos' || selectedAttendanceFilter === 'tudo' || !!selectedFollowUpNode) && conversations.length > 0 ? (
             (() => {
               const filteredConversations = formatConversationsForDisplay(conversations)
                 .filter((conv) => {
@@ -4735,9 +4751,6 @@ export const SupervisorDashboard: React.FC = () => {
                     const sid = (conv as any).sellerId;
                     const subdiv = (conv as any).sellerSubdivision;
                     if (attr || sid || subdiv) return false; // atribuído → não exibir
-                    // Exibir apenas Triagem e Encaminhados E-commerce (não Encaminhados Balcão)
-                    const unassignedSrc = (conv as any).unassignedSource;
-                    if (unassignedSrc === 'encaminhados-balcao') return false;
                   }
                   // Filter by search term (client name)
                   if (!searchTerm.trim()) return true;
@@ -4795,10 +4808,14 @@ export const SupervisorDashboard: React.FC = () => {
                         const updated = prev.map((c) =>
                           c.id === conv.id ? { ...c, unread: 0 } : c
                         );
-                        if (selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'triagem') {
+                        if (selectedAttendanceFilter === 'nao-atribuidos') {
                           setUnassignedConversationsCache((prevCache) =>
                             prevCache.map((c) => (c.id === conv.id ? { ...c, unread: 0 } : c))
                           );
+                        }
+                        if (selectedAttendanceFilter === 'abertos') {
+                          const prevUnread = (conv as { unread?: number }).unread ?? 0;
+                          setTotalUnreadAbertos((u) => Math.max(0, u - prevUnread));
                         }
                         return updated;
                       });
@@ -4808,10 +4825,14 @@ export const SupervisorDashboard: React.FC = () => {
                         const updated = prev.map((c) =>
                           c.id === conv.id ? { ...c, unread: 0 } : c
                         );
-                        if (selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'triagem') {
+                        if (selectedAttendanceFilter === 'nao-atribuidos') {
                           setUnassignedConversationsCache((prevCache) =>
                             prevCache.map((c) => (c.id === conv.id ? { ...c, unread: 0 } : c))
                           );
+                        }
+                        if (selectedAttendanceFilter === 'abertos') {
+                          const prevUnread = (conv as { unread?: number }).unread ?? 0;
+                          setTotalUnreadAbertos((u) => Math.max(0, u - prevUnread));
                         }
                         return updated;
                       });
@@ -4833,11 +4854,61 @@ export const SupervisorDashboard: React.FC = () => {
                     <div className="min-w-0 flex-1">
                       <h4 className="text-sm font-bold truncate text-slate-900 dark:text-white">{conv.name}</h4>
                       {(() => {
+                        // View Abertos: badge indicando origem (AI, Intervenção, Vendedor)
+                        if (selectedAttendanceFilter === 'abertos') {
+                          const att = (conv as any).attributionSource;
+                          const hasSeller = (conv as any).sellerId || att?.sellerId;
+                          const hasIntervention = (conv as any).interventionType || att?.interventionType;
+                          const unassignedSource = (conv as any).unassignedSource;
+                          let badgeLabel = 'Não classificado';
+                          let badgeColor = 'bg-slate-200 dark:bg-slate-600 text-slate-800 dark:text-slate-200';
+                          if (hasSeller && att?.type === 'seller') {
+                            badgeLabel = att?.label ?? 'Vendedor';
+                            badgeColor = 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200';
+                          } else if (hasIntervention || att?.type === 'intervention') {
+                            badgeLabel = getServiceLabelFromConv(conv) ?? att?.label ?? 'Intervenção';
+                            badgeColor = 'bg-sky-100 dark:bg-sky-900/40 text-sky-800 dark:text-sky-200';
+                          } else if (unassignedSource === 'encaminhados-ecommerce') {
+                            badgeLabel = 'E-commerce';
+                            badgeColor = 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-200';
+                          } else if (unassignedSource === 'encaminhados-balcao') {
+                            badgeLabel = 'Balcão';
+                            badgeColor = 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-200';
+                          } else {
+                            badgeLabel = 'AI';
+                            badgeColor = 'bg-violet-100 dark:bg-violet-900/40 text-violet-800 dark:text-violet-200';
+                          }
+                          return (
+                            <span className={`inline-block mt-0.5 text-[10px] px-1.5 py-0.5 rounded truncate max-w-[140px] font-medium ${badgeColor}`} title={badgeLabel}>
+                              {badgeLabel}
+                            </span>
+                          );
+                        }
+                        // View Intervenção humana: badge com nome do serviço em que o contato está classificado
+                        if (viewingIntervencaoHumana) {
+                          const serviceLabel = getServiceLabelFromConv(conv) ?? 'Não classificado';
+                          return (
+                            <span className="inline-block mt-0.5 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-gray-200 truncate max-w-[140px] font-medium" title={serviceLabel}>
+                              {serviceLabel}
+                            </span>
+                          );
+                        }
+                        // View serviço: badge com nome do serviço para conversas de intervenção
+                        if (selectedServiceCategory) {
+                          const serviceLabel = getServiceLabelFromConv(conv, selectedServiceCategory);
+                          if (serviceLabel) {
+                            return (
+                              <span className="inline-block mt-0.5 text-[10px] px-1.5 py-0.5 rounded bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-gray-200 truncate max-w-[140px] font-medium" title={serviceLabel}>
+                                {serviceLabel}
+                              </span>
+                            );
+                          }
+                        }
                         // Se selecionou "Todas as Demandas", exibir vendedor + marca + subdivisão
                         if (selectedTodasDemandasSubdivision) {
                           const seller = supervisorSellers.find(s => s.id === (conv as any).sellerId);
                           const sellerName = seller?.name || 'Vendedor';
-                          const sellerBrand = seller?.brands?.[0] ? getBrandLabel(seller.brands[0]) : 'Marca';
+                          const sellerBrand = seller?.brands?.[0] ? getCategoryLabelForBrand(seller.brands[0] as VehicleBrand) : 'Serviço';
                           const subdivLabels: Record<string, string> = {
                             'pedidos-orcamentos': 'Pedidos de Orçamentos',
                             'perguntas-pos-orcamento': 'Perguntas Pós Orçamento',
@@ -4857,12 +4928,10 @@ export const SupervisorDashboard: React.FC = () => {
 
                         const attrLabel = (conv as any).attributionSource?.label;
                         const unassignedSrc = (conv as any).unassignedSource;
-                        const unassignedLabels: Record<string, string> = {
-                          triagem: 'Triagem',
-                          'encaminhados-ecommerce': 'Encaminhados E-commerce',
-                          'encaminhados-balcao': 'Encaminhados Balcão',
-                        };
-                        const badgeLabel = attrLabel ?? (selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' && unassignedSrc ? unassignedLabels[unassignedSrc] ?? unassignedSrc : null);
+                        const inferredServiceLabel = getServiceLabelFromConv(conv, selectedServiceCategory);
+                        const badgeLabel = inferredServiceLabel
+                          ?? attrLabel
+                          ?? (selectedAttendanceFilter === 'nao-atribuidos' && unassignedSrc ? 'AI' : null);
                         if (!badgeLabel) return null;
                         return (
                           <span className="inline-block mt-0.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 truncate max-w-[140px]" title={badgeLabel}>
@@ -4892,24 +4961,6 @@ export const SupervisorDashboard: React.FC = () => {
                         </span>
                       )}
                     </div>
-                    {user?.role === 'SUPERVISOR' && !isBulkSelectMode && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAssignTargetAttendanceId(String(conv.id));
-                          const currentSellerId =
-                            ((conv as any).sellerId as string | undefined) ||
-                            ((conv as any).attributionSource?.sellerId as string | undefined);
-                          setAssignSellerId(currentSellerId ?? null);
-                          setAssignModalOpen(true);
-                        }}
-                        className="mt-1 inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-300"
-                      >
-                        <span className="material-icons-round text-xs mr-1">how_to_reg</span>
-                        {((conv as any).sellerId || (conv as any).attributionSource?.sellerId) ? 'Reatribuir' : 'Atribuir'}
-                      </button>
-                    )}
                   </div>
                 </div>
               </div>
@@ -4925,27 +4976,23 @@ export const SupervisorDashboard: React.FC = () => {
                     ? 'Nenhuma demanda no momento'
                     : selectedTodasDemandasSubdivision
                     ? 'Nenhuma demanda nesta categoria no momento'
-                    : selectedIntervencaoHumano === 'demanda-telefone-fixo'
-                    ? 'Nenhuma demanda telefone fixo no momento'
-                    : selectedIntervencaoHumanoSubdivision === 'garantia'
-                    ? 'Nenhuma garantia no momento'
-                    : selectedIntervencaoHumanoSubdivision === 'troca'
-                    ? 'Nenhuma troca no momento'
-                    : selectedIntervencaoHumanoSubdivision === 'estorno'
-                    ? 'Nenhum estorno no momento'
+                    : viewingIntervencaoHumana && !selectedServiceCategory
+                    ? 'Nenhuma conversa de intervenção no momento'
+                    : selectedServiceCategory && viewingIntervencaoHumana
+                    ? `Nenhuma conversa de intervenção em ${SERVICE_CATEGORIES.find(c => c.key === selectedServiceCategory)?.label ?? selectedServiceCategory} no momento`
+                    : selectedAttendanceFilter === 'abertos'
+                    ? 'Nenhum atendimento aberto no momento'
                     : selectedAttendanceFilter === 'nao-atribuidos'
-                    ? selectedNaoAtribuidosFilter === 'triagem'
-                      ? 'Nenhum em triagem'
-                      : selectedNaoAtribuidosFilter === 'encaminhados-ecommerce'
-                        ? 'Nenhum encaminhado para E-commerce'
-                        : selectedNaoAtribuidosFilter === 'encaminhados-balcao'
-                          ? 'Nenhum encaminhado para Balcão'
-                          : 'Nenhuma conversa não atribuída encontrada'
+                    ? 'Nenhuma conversa em atendimento pela AI no momento'
+                    : selectedFollowUpNode
+                    ? `Nenhum cliente em ${FOLLOW_UP_LABELS[selectedFollowUpNode] ?? 'Follow UP'} no momento`
                     : selectedSeller
                     ? 'Nenhuma conversa encontrada para este vendedor'
-                    : selectedAttendanceFilter === 'tudo' && !selectedIntervencaoHumano
+                    : selectedServiceCategory
+                    ? `Nenhum atendimento em ${SERVICE_CATEGORIES.find(c => c.key === selectedServiceCategory)?.label ?? selectedServiceCategory} no momento`
+                    : selectedAttendanceFilter === 'tudo'
                     ? 'Nenhum atendimento atribuído no momento'
-                    : 'Selecione um vendedor ou filtro para ver as conversas'}
+                    : 'Selecione um serviço ou filtro para ver as conversas'}
                 </p>
               </div>
             </div>
@@ -4956,126 +5003,204 @@ export const SupervisorDashboard: React.FC = () => {
       )}
 
       {/* Main Chat Area */}
-      <main className="flex-grow flex flex-col min-w-0 relative max-h-screen min-h-0 bg-slate-100 dark:bg-slate-950">
+      <main className={`flex-1 flex flex-col min-w-0 min-h-0 bg-slate-100 dark:bg-slate-950 ${activeSupervisorTab === 'estatisticas' ? 'overflow-hidden' : ''}`}>
         {activeSupervisorTab === 'estatisticas' ? (
-          <div className="flex-grow overflow-y-auto p-6 custom-scrollbar min-h-0">
-            <div className="max-w-6xl mx-auto space-y-6">
-              <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-5">
-                <div className="flex flex-col gap-4">
-                  <div>
-                    <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Estatísticas</h2>
-                    <p className="text-sm text-slate-500 dark:text-slate-400">Indicadores de atendimentos com filtros por período e marca.</p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {([
-                      { key: 'dia', label: 'Dia' },
-                      { key: 'semana', label: 'Semana' },
-                      { key: 'mes', label: 'Mês' },
-                    ] as const).map((option) => (
-                      <button
-                        key={option.key}
-                        type="button"
-                        onClick={() => setStatsPeriod(option.key)}
-                        className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${
-                          statsPeriod === option.key
-                            ? 'bg-blue-50 border-blue-300 text-blue-700 dark:bg-blue-900/30 dark:border-blue-700 dark:text-blue-300'
-                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-300'
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap items-end gap-3">
-                    {statsPeriod === 'dia' && (
-                      <label className="flex flex-col text-xs text-slate-600 dark:text-slate-300 gap-1">
-                        Dia
-                        <input
-                          type="date"
-                          value={statsDay}
-                          onChange={(e) => setStatsDay(e.target.value)}
-                          className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
-                        />
-                      </label>
-                    )}
-                    {statsPeriod === 'semana' && (
-                      <label className="flex flex-col text-xs text-slate-600 dark:text-slate-300 gap-1">
-                        Início da semana
-                        <input
-                          type="date"
-                          value={statsWeekStart}
-                          onChange={(e) => setStatsWeekStart(e.target.value)}
-                          className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
-                        />
-                      </label>
-                    )}
-                    {statsPeriod === 'mes' && (
-                      <label className="flex flex-col text-xs text-slate-600 dark:text-slate-300 gap-1">
-                        Mês
-                        <input
-                          type="month"
-                          value={statsMonth}
-                          onChange={(e) => setStatsMonth(e.target.value)}
-                          className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
-                        />
-                      </label>
-                    )}
-                    <label className="flex flex-col text-xs text-slate-600 dark:text-slate-300 gap-1">
-                      Marca
-                      <select
-                        value={statsBrandFilter}
-                        onChange={(e) => setStatsBrandFilter(e.target.value as 'ALL' | VehicleBrand)}
-                        className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm min-w-[160px]"
-                      >
-                        <option value="ALL">Todas as marcas</option>
-                        <option value="FORD">Ford</option>
-                        <option value="GM">GM</option>
-                        <option value="VW">VW</option>
-                        <option value="FIAT">Fiat</option>
-                        <option value="IMPORTADOS">Importados</option>
-                      </select>
-                    </label>
-                  </div>
-                </div>
-              </div>
+          <div className="flex-1 min-h-0 min-w-0 overflow-hidden bg-slate-100 dark:bg-slate-950 relative flex flex-col">
+            <div
+              className="pointer-events-none absolute inset-0 opacity-40 dark:opacity-20"
+              style={{
+                backgroundImage:
+                  'radial-gradient(circle at 20% 20%, rgba(59,130,246,0.08), transparent 35%), radial-gradient(circle at 80% 0%, rgba(15,23,42,0.18), transparent 45%), repeating-linear-gradient(45deg, rgba(15,23,42,0.04) 0 1px, transparent 1px 10px)',
+              }}
+            />
+            <div className="relative w-full overflow-hidden p-3 sm:p-4 lg:p-5">
+              <div className="w-full max-w-7xl mx-auto overflow-hidden space-y-4 sm:space-y-5">
+                <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
+                  <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
+                    <div className="flex flex-col gap-3">
+                      <div>
+                        <h2 className="text-xl font-bold text-slate-900 dark:text-white">Estatísticas</h2>
+                        <p className="text-sm text-slate-500 dark:text-slate-400">Indicadores de atendimentos com filtros por período.</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {([
+                          { key: 'dia', label: 'Dia' },
+                          { key: 'semana', label: 'Semana' },
+                          { key: 'mes', label: 'Mês' },
+                        ] as const).map((option) => (
+                          <button
+                            key={option.key}
+                            type="button"
+                            onClick={() => setStatsPeriod(option.key)}
+                            className={`px-3 py-1.5 text-sm font-medium rounded-lg border transition-colors ${
+                              statsPeriod === option.key
+                                ? 'bg-blue-600 text-white border-blue-600 dark:bg-blue-500 dark:border-blue-500'
+                                : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                        {statsPeriod === 'dia' && (
+                          <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                            <span>Dia</span>
+                            <input
+                              type="date"
+                              value={statsDay}
+                              onChange={(e) => setStatsDay(e.target.value)}
+                              className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm"
+                            />
+                          </label>
+                        )}
+                        {statsPeriod === 'semana' && (
+                          <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                            <span>Início da semana</span>
+                            <input
+                              type="date"
+                              value={statsWeekStart}
+                              onChange={(e) => setStatsWeekStart(e.target.value)}
+                              className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm"
+                            />
+                          </label>
+                        )}
+                        {statsPeriod === 'mes' && (
+                          <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                            <span>Mês</span>
+                            <input
+                              type="month"
+                              value={statsMonth}
+                              onChange={(e) => setStatsMonth(e.target.value)}
+                              className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm"
+                            />
+                          </label>
+                        )}
+                      </div>
+                    </div>
 
-              {isLoadingSupervisorStats ? (
-                <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-8 text-center text-slate-500 dark:text-slate-400">
-                  Carregando estatísticas...
-                </div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-5">
-                      <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Atendimentos hoje</p>
-                      <p className="mt-2 text-3xl font-bold text-slate-900 dark:text-white">{supervisorStats.dayAttendances ?? 0}</p>
-                    </div>
-                    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-5">
-                      <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Atendimentos no período</p>
-                      <p className="mt-2 text-3xl font-bold text-slate-900 dark:text-white">{supervisorStats.filteredAttendances ?? 0}</p>
-                    </div>
-                    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-5">
-                      <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide">Atendimentos totais</p>
-                      <p className="mt-2 text-3xl font-bold text-slate-900 dark:text-white">{supervisorStats.totalAttendances ?? 0}</p>
-                    </div>
-                  </div>
-
-                  <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-5">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Atendimentos por marca</h3>
-                      <span className="text-xs text-slate-500 dark:text-slate-400">Respeita os filtros selecionados</span>
-                    </div>
-                    <div className="space-y-2">
-                      {(['FORD', 'GM', 'VW', 'FIAT', 'IMPORTADOS'] as const).map((brand) => (
-                        <div key={brand} className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800/60">
-                          <span className="text-sm text-slate-700 dark:text-slate-200">{brand}</span>
-                          <span className="text-sm font-semibold text-slate-900 dark:text-white">{supervisorStats.byBrand?.[brand] ?? 0}</span>
+                    {!isLoadingSupervisorStats && (
+                      <div className="flex flex-nowrap items-stretch justify-end gap-3 w-full xl:min-w-[640px]">
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px] mr-6 xl:mr-8">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos totais</p>
+                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.totalAttendances ?? 0}</p>
                         </div>
-                      ))}
-                    </div>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px]">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos hoje</p>
+                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.dayAttendances ?? 0}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px]">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos na semana</p>
+                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{isLoadingWeekAttendances ? '...' : weekAttendances}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px]">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos no mês</p>
+                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{isLoadingMonthAttendances ? '...' : monthAttendances}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px] ml-6 xl:ml-8">
+                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos fechados</p>
+                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{activeCountBySubdivision['fechados'] ?? 0}</p>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </>
-              )}
+                </div>
+
+                {isLoadingSupervisorStats ? (
+                  <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 p-10 text-center text-slate-500 dark:text-slate-400">
+                    Carregando estatísticas...
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3 xl:gap-4 items-stretch">
+                      <div className="space-y-3">
+                        <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Atendimentos sobre prótese capilar</h3>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div className="rounded-xl border border-sky-200/70 dark:border-sky-900/60 bg-sky-50/60 dark:bg-sky-900/20 p-3">
+                              <p className="text-xs text-sky-800 dark:text-sky-300">Quantidade de atendimentos sobre próteses capilares encaminhados</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{prosthesisReferrals}</p>
+                            </div>
+                            <div className="rounded-xl border border-sky-200/70 dark:border-sky-900/60 bg-sky-50/40 dark:bg-sky-900/15 p-3">
+                              <p className="text-xs text-sky-800 dark:text-sky-300">Percentual de atendimentos sobre próteses capilares</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{protesePercentValue.toFixed(1)}%</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Atendimentos sobre manutenção</h3>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div className="rounded-xl border border-amber-200/70 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-900/20 p-3">
+                              <p className="text-xs text-amber-800 dark:text-amber-300">Quantidade de links de agendamento enviados</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{maintenanceBookings}</p>
+                            </div>
+                            <div className="rounded-xl border border-amber-200/70 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-900/15 p-3">
+                              <p className="text-xs text-amber-800 dark:text-amber-300">Percentual de atendimentos que tiveram links de agendamento enviados</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{manutencaoPercentValue.toFixed(1)}%</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Atendimentos sobre outras coisas</h3>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div className="rounded-xl border border-fuchsia-200/70 dark:border-fuchsia-900/60 bg-fuchsia-50/60 dark:bg-fuchsia-900/20 p-3">
+                              <p className="text-xs text-fuchsia-800 dark:text-fuchsia-300">Quantidade de atendimentos sobre outras coisas</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{otherSubjectAttendances}</p>
+                            </div>
+                            <div className="rounded-xl border border-fuchsia-200/70 dark:border-fuchsia-900/60 bg-fuchsia-50/40 dark:bg-fuchsia-900/15 p-3">
+                              <p className="text-xs text-fuchsia-800 dark:text-fuchsia-300">Percentual de atendimentos sobre outras coisas</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{outrosPercentValue.toFixed(1)}%</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Atendimentos não classificados</h3>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div className="rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-800/40 p-3">
+                              <p className="text-xs text-slate-600 dark:text-slate-400">Quantidade de atendimentos não classificados</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{unclassifiedCount}</p>
+                            </div>
+                            <div className="rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-slate-50/40 dark:bg-slate-800/30 p-3">
+                              <p className="text-xs text-slate-600 dark:text-slate-400">Percentual de atendimentos não classificados</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{unclassifiedPercentValue.toFixed(1)}%</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4 flex flex-col justify-center">
+                        <h3 className="text-sm font-semibold text-slate-900 dark:text-white text-center mb-4">Percentuais por classificação</h3>
+                        <div className="mx-auto w-48 h-48 rounded-full border-8 border-white/60 dark:border-slate-800/80 shadow-sm"
+                          style={{
+                            background: `conic-gradient(#0ea5e9 0% ${protesePercentValue.toFixed(2)}%, #f59e0b ${protesePercentValue.toFixed(2)}% ${(protesePercentValue + manutencaoPercentValue).toFixed(2)}%, #d946ef ${(protesePercentValue + manutencaoPercentValue).toFixed(2)}% ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue).toFixed(2)}%, #94a3b8 ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue).toFixed(2)}% ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue + unclassifiedPercentValue).toFixed(2)}%, #e2e8f0 ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue + unclassifiedPercentValue).toFixed(2)}% 100%)`,
+                          }}
+                        />
+                        <div className="mt-5 space-y-2 text-sm">
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-sky-500" />Prótese capilar</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{protesePercentValue.toFixed(1)}%</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-amber-500" />Manutenção</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{manutencaoPercentValue.toFixed(1)}%</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-fuchsia-500" />Outras coisas</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{outrosPercentValue.toFixed(1)}%</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-slate-400" />Não classificados</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{unclassifiedPercentValue.toFixed(1)}%</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
         ) : (
@@ -5137,8 +5262,8 @@ export const SupervisorDashboard: React.FC = () => {
                         setSelectedSeller(sellerId);
                         setSelectedSellerSubdivision(null);
                         setSelectedSellerBrand(null);
-                        setSelectedIntervencaoHumano(null);
-                        setSelectedIntervencaoHumanoSubdivision(null);
+                        setSelectedServiceCategory(null);
+                        setViewingIntervencaoHumana(false);
                         setSelectedDemandaKey(null);
                         setViewingFromDemandasCard(false);
                         setSelectedQuote(null);
@@ -5527,7 +5652,7 @@ export const SupervisorDashboard: React.FC = () => {
                             className="w-9 h-9 bg-navy flex items-center justify-center rounded-full text-[10px] text-white font-medium flex-shrink-0" 
                             style={{ backgroundColor: '#003070' }}
                           >
-                            AL
+                            {((msg.sender === 'Altese AI' ? 'AI' : msg.sender) || 'AI').substring(0, 2).toUpperCase() || 'AI'}
                           </div>
                         )
                       ) : (
@@ -5538,7 +5663,7 @@ export const SupervisorDashboard: React.FC = () => {
                         {/* Show sender name only for first message in group */}
                         {isFirstInGroup && (
                           <div className={`flex items-center gap-1.5 mb-1 ${msg.isClient ? '' : 'flex-row-reverse'}`}>
-                            <span className="text-sm font-medium text-slate-600 dark:text-white">{msg.sender}</span>
+                            <span className="text-sm font-medium text-slate-600 dark:text-white">{msg.sender === 'Altese AI' ? 'AI' : msg.sender}</span>
                           </div>
                         )}
                         <div 
@@ -5636,7 +5761,7 @@ export const SupervisorDashboard: React.FC = () => {
                   })()}
                   {/* Show typing indicator if AI is typing - só quando IA está ativa (não desativada) */}
                   {selectedConversation && isAITyping[selectedConversation] && selectedConversationData?.handledBy === 'AI' && !aiStatus[selectedConversation as string]?.disabled && (
-                    <TypingIndicator sender="Altese AI" isClient={false} />
+                    <TypingIndicator sender="AI" isClient={false} />
                   )}
                   {/* Show typing indicator if client is typing for this conversation */}
                   {(() => {
@@ -5750,7 +5875,7 @@ export const SupervisorDashboard: React.FC = () => {
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                           A IA continuará armazenando o contexto da conversa
                         </p>
-                        {selectedConversation && inactivityTimer[selectedConversation as string] !== undefined && (
+                        {selectedConversation && inactivityTimer[selectedConversation as string] !== undefined && inactivityTimer[selectedConversation as string] > 0 && !aiStatus[selectedConversation as string]?.disabled && (
                           <span className="text-xs font-semibold text-orange-600 dark:text-orange-400">
                             • Devolve em: {formatTimer(inactivityTimer[selectedConversation as string])}
                           </span>
@@ -5967,69 +6092,6 @@ export const SupervisorDashboard: React.FC = () => {
       )}
       </main>
 
-      {/* Modal de atribuição manual de atendimento a vendedor */}
-      {assignModalOpen && assignTargetAttendanceId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white dark:bg-slate-900 rounded-lg shadow-xl w-full max-w-md p-5">
-            <h2 className="text-lg font-semibold mb-2">Atribuir atendimento a vendedor</h2>
-            <p className="text-sm text-slate-600 dark:text-slate-300 mb-3">
-              Selecione o vendedor que ficará responsável por este cliente.
-            </p>
-            <select
-              value={assignSellerId ?? ''}
-              onChange={(e) => setAssignSellerId(e.target.value || null)}
-              className="w-full border border-slate-300 dark:border-slate-700 rounded-md px-3 py-2 text-sm bg-white dark:bg-slate-800 mb-4"
-            >
-              <option value="">Selecione um vendedor</option>
-              {supervisorSellers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setAssignModalOpen(false);
-                  setAssignTargetAttendanceId(null);
-                  setAssignSellerId(null);
-                }}
-                className="px-3 py-1.5 text-sm rounded-md border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                disabled={!assignSellerId}
-                onClick={async () => {
-                  if (!assignSellerId || !assignTargetAttendanceId) return;
-                  try {
-                    await attendanceService.assignSeller(assignTargetAttendanceId as string, assignSellerId as string);
-                    // Atualização otimista do estado local
-                    setConversations((prev) =>
-                      prev.map((c) =>
-                        String(c.id) === assignTargetAttendanceId
-                          ? { ...c, sellerId: assignSellerId, handledBy: 'HUMAN' }
-                          : c
-                      )
-                    );
-                    setAssignModalOpen(false);
-                    setAssignTargetAttendanceId(null);
-                    setAssignSellerId(null);
-                  } catch (e) {
-                    console.error('Erro ao atribuir vendedor', e);
-                  }
-                }}
-                className="px-3 py-1.5 text-sm rounded-md bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50"
-              >
-                Confirmar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Customer Info Sidebar */}
       {activeSupervisorTab === 'chat' && selectedConversation && (
         <aside 
@@ -6201,7 +6263,7 @@ export const SupervisorDashboard: React.FC = () => {
                   </div>
                   <div className="space-y-2">
                     {Object.entries(selectedConversationData.interventionData).map(([key, value]) => {
-                      const label = INTERVENTION_DATA_LABELS[key] ?? key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+                      const label = INTERVENTION_DATA_LABELS[key] ?? key.replace(/_/g, ' ').replace(/-/g, ' ').toLowerCase().replace(/^\w/, (c) => c.toUpperCase());
                       const displayValue = (key === 'client_phone' || key === 'clientPhone') && typeof value === 'string'
                         ? formatPhoneNumber(value)
                         : String(value ?? '—');
@@ -6217,6 +6279,42 @@ export const SupervisorDashboard: React.FC = () => {
               )}
             </div>
             <div className="px-6 py-4 border-t border-slate-100 dark:border-slate-800 space-y-3">
+              {/* Botão Toggle IA - só mostra se o atendimento não estiver fechado */}
+              {selectedConversationData?.state !== 'FINISHED' && (
+                <button
+                  onClick={async () => {
+                    if (!selectedConversation) return;
+                    const convId = selectedConversation as string;
+                    const isCurrentlyDisabled = aiStatus[convId]?.disabled;
+                    try {
+                      if (isCurrentlyDisabled) {
+                        await attendanceService.enableAI(convId);
+                        setAiStatus((prev) => ({ ...prev, [convId]: { disabled: false } }));
+                        toast.success('IA reativada para este atendimento');
+                      } else {
+                        await attendanceService.disableAI(convId);
+                        setAiStatus((prev) => ({ ...prev, [convId]: { disabled: true } }));
+                        toast.success('IA desligada para este atendimento');
+                      }
+                    } catch (error: any) {
+                      console.error('Error toggling AI:', error);
+                      toast.error(error.response?.data?.error || 'Erro ao alterar estado da IA');
+                    }
+                  }}
+                  className={`w-full flex items-center justify-center space-x-2 px-4 py-3 rounded-lg transition-colors ${
+                    aiStatus[selectedConversation as string]?.disabled
+                      ? 'bg-green-50 dark:bg-green-900/20 hover:bg-green-100 dark:hover:bg-green-900/30 text-green-600 dark:text-green-400'
+                      : 'bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30 text-amber-600 dark:text-amber-400'
+                  }`}
+                >
+                  <span className="material-icons-round text-sm">
+                    {aiStatus[selectedConversation as string]?.disabled ? 'smart_toy' : 'block'}
+                  </span>
+                  <span className="text-sm font-medium">
+                    {aiStatus[selectedConversation as string]?.disabled ? 'Ligar IA' : 'Desligar IA'}
+                  </span>
+                </button>
+              )}
               {/* Botão Fechar Atendimento - só mostra se não estiver fechado */}
               {selectedConversationData?.state !== 'FINISHED' && (
                 <button
@@ -6230,7 +6328,6 @@ export const SupervisorDashboard: React.FC = () => {
                     try {
                       await attendanceService.closeAttendance(selectedConversation as string);
                       toast.success('Atendimento fechado com sucesso');
-                      // O Socket.IO vai atualizar automaticamente via handleMovedToFechados
                     } catch (error: any) {
                       console.error('Error closing attendance:', error);
                       toast.error(error.response?.data?.error || 'Erro ao fechar atendimento');
@@ -6297,6 +6394,7 @@ export const SupervisorDashboard: React.FC = () => {
                     attendanceId: item.attendanceId,
                   }))
                 )
+                .filter((m) => !isLegacyRelocationSystemMessage(m as any))
                 .sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime())
                 .map((m) => {
                   const isClient = m.origin === 'CLIENT' || m.isClient;

@@ -18,13 +18,7 @@ export default defineConfig({
   server: {
     port: 5173,
     host: '0.0.0.0', // Permite acesso de qualquer IP
-    allowedHosts: [
-      'alteseai-app.dialoguetech.com.br',
-      'devaltese-app.dialoguetech.com.br',
-      'devaltese.dialoguetech.com.br',
-      'localhost',
-      '127.0.0.1',
-    ],
+    allowedHosts: true, // Permite qualquer host/domínio (túnel, dev.dialoguetech.com.br, etc.)
     proxy: {
       '/api': {
         target: 'http://localhost:3000',

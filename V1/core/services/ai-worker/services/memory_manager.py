@@ -1255,15 +1255,26 @@ Forneça um resumo em português, objetivo e direto.
 
     async def get_dados_para_orcamento_xml(self, attendance_id: str) -> str:
         """
-        Monta a seção <DadosParaOrcamento> do system prompt com variáveis dinâmicas:
-        - Obrigatorios/OpcionalRecomendado: do schema da FC pedidoorcamento
-        - Capturados: dados do último QuoteRequest (vehicle_info)
-        - UltimoEnviado: mesmo que Capturados (último payload enviado via pedido-orcamento)
-        
-        Usado para o agente saber o que já foi coletado e só acionar a FC se houver itens novos.
+        Monta a seção <DadosParaOrcamento> do system prompt com variáveis dinâmicas.
+        Só inclui quando a FC pedido-orcamento está configurada e ativa (evita contexto
+        de autopeças em negócios que não usam orçamento de peças).
         """
         try:
-            # 1. Buscar último QuoteRequest do atendimento (vehicle_info)
+            # 0. Só incluir se a FC pedido-orcamento existir e estiver ativa
+            fc_row = await self.pg_client.fetchrow(
+                """
+                SELECT required_fields, optional_fields
+                FROM agent_function_calls
+                WHERE (name = $1 OR name = $2) AND is_active = true
+                LIMIT 1
+                """,
+                "pedidoorcamento",
+                "pedido-orcamento",
+            )
+            if not fc_row:
+                return ""
+
+            # 1. Buscar último QuoteRequest do atendimento (vehicle_info ou custom)
             last_quote = await self.pg_client.fetchrow(
                 """
                 SELECT vehicle_info
@@ -1284,58 +1295,31 @@ Forneça um resumo em português, objetivo e direto.
                     return "[não informado]"
                 return str(v).strip()
 
-            capturados = {
-                "marca": _val("marca"),
-                "modelo": _val("modelo"),
-                "ano": _val("ano"),
-                "peca": _val("peca"),
-                "placa": _val("placa"),
-            }
+            # Campos dinâmicos a partir do schema da FC
+            req = fc_row.get("required_fields") or []
+            opt = fc_row.get("optional_fields") or []
+            if isinstance(req, str):
+                req = [x.strip() for x in str(req).split(",") if x.strip()]
+            if isinstance(opt, str):
+                opt = [x.strip() for x in str(opt).split(",") if x.strip()]
+            all_fields = list(dict.fromkeys(req + opt)) or ["marca", "modelo", "ano", "peca", "placa"]
+            obrigatorios = ",".join(req) if req else "marca,modelo,ano,peca"
+            opcional_recomendado = ",".join(opt) if opt else "placa"
 
-            # 2. Buscar schema da FC pedidoorcamento (obrigatórios/opcionais)
-            fc_row = await self.pg_client.fetchrow(
-                """
-                SELECT required_fields, optional_fields
-                FROM agent_function_calls
-                WHERE (name = $1 OR name = $2) AND is_active = true
-                LIMIT 1
-                """,
-                "pedidoorcamento",
-                "pedido-orcamento",
-            )
-            obrigatorios = "marca,modelo,ano,peca"
-            opcional_recomendado = "placa"
-            if fc_row:
-                req = fc_row.get("required_fields") or []
-                opt = fc_row.get("optional_fields") or []
-                if isinstance(req, str):
-                    req = [x.strip() for x in req.split(",") if x.strip()]
-                if isinstance(opt, str):
-                    opt = [x.strip() for x in opt.split(",") if x.strip()]
-                if req:
-                    obrigatorios = ",".join(req)
-                if opt:
-                    opcional_recomendado = ",".join(opt)
+            capturados = {f: _val(f) for f in all_fields}
 
-            # 3. Montar XML
+            # 2. Montar XML com campos dinâmicos
+            capturados_lines = [f"    <{f}>{capturados.get(f, '[não informado]')}</{f}>" for f in all_fields]
             lines = [
                 "",
                 "<DadosParaOrcamento>",
                 f"  <Obrigatorios>{obrigatorios}</Obrigatorios>",
                 f"  <OpcionalRecomendado>{opcional_recomendado}</OpcionalRecomendado>",
                 "  <Capturados>",
-                f"    <marca>{capturados['marca']}</marca>",
-                f"    <modelo>{capturados['modelo']}</modelo>",
-                f"    <ano>{capturados['ano']}</ano>",
-                f"    <peca>{capturados['peca']}</peca>",
-                f"    <placa>{capturados['placa']}</placa>",
+                *capturados_lines,
                 "  </Capturados>",
                 "  <UltimoEnviado>",
-                f"    <marca>{capturados['marca']}</marca>",
-                f"    <modelo>{capturados['modelo']}</modelo>",
-                f"    <ano>{capturados['ano']}</ano>",
-                f"    <peca>{capturados['peca']}</peca>",
-                f"    <placa>{capturados['placa']}</placa>",
+                *capturados_lines,
                 "  </UltimoEnviado>",
                 "</DadosParaOrcamento>",
             ]

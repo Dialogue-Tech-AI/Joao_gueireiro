@@ -75,11 +75,12 @@ export class MessageSenderService {
         throw new Error(`WhatsApp not connected for number: ${attendance.whatsappNumberId}`);
       }
 
-      // Send message via WhatsApp (with or without sender name)
+      // Send message via WhatsApp: prefixo apenas para usuários (vendedores), nunca para IA
+      const nameForWhatsApp = shouldIncludeName && senderName && senderName !== 'Altese AI' ? senderName : undefined;
       await adapter.sendMessage(
         attendance.clientPhone, 
         content,
-        shouldIncludeName && senderName ? senderName : undefined
+        nameForWhatsApp
       );
 
       // Update status to SENT

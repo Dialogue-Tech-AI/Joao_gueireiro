@@ -14,9 +14,12 @@ import { Not, In, LessThan, MoreThanOrEqual } from 'typeorm';
 import { MediaService } from './media.service';
 import { messageBufferService } from './message-buffer.service';
 import { mediaProcessorService } from './media-processor.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 
 const FC_NAME_FECHA_BALCAO = 'fechaatendimentobalcao';
 const DEFAULT_TEMPO_FECHAMENTO_BALCAO_MIN = 30;
+const AUTO_REOPEN_HOURS = 8;
+const AUTO_REOPEN_TIMEOUT_MINUTES = AUTO_REOPEN_HOURS * 60;
 
 /**
  * Message Processor Service
@@ -31,6 +34,8 @@ export class MessageProcessorService {
   async processIncomingMessage(whatsappMessage: WhatsAppMessage): Promise<void> {
     try {
       const phone = whatsappMessage.phoneNumber;
+      const isFromMe = !!whatsappMessage.fromMe;
+
       const isBlacklisted = await aiConfigService.isPhoneBlacklisted(phone);
       if (isBlacklisted) {
         logger.info('Ignoring message from blacklisted number', {
@@ -45,7 +50,14 @@ export class MessageProcessorService {
         messageId: whatsappMessage.id,
         from: phone,
         whatsappNumberId: whatsappMessage.whatsappNumberId,
+        fromMe: isFromMe,
       });
+
+      // Mensagem do dono enviada do celular (fora da plataforma)
+      if (isFromMe) {
+        await this.processOwnerMessageFromPhone(whatsappMessage);
+        return;
+      }
 
       // Find or create attendance for this client phone number
       // Note: IA decide criar/reutilizar via function call decidir_atendimento
@@ -156,9 +168,8 @@ export class MessageProcessorService {
           );
         }
 
-        // Verificar se há atendimento fechado recente para reabrir automaticamente
-        const autoReopenTimeoutMinutes = await aiConfigService.getAutoReopenTimeout();
-        const cutoffTime = new Date(Date.now() - autoReopenTimeoutMinutes * 60 * 1000);
+        // Regra de negócio: reabrir automaticamente em até 8 horas após fechamento.
+        const cutoffTime = new Date(Date.now() - AUTO_REOPEN_TIMEOUT_MINUTES * 60 * 1000);
 
         const recentlyClosedAttendance = await attendanceRepo.findOne({
           where: {
@@ -175,18 +186,19 @@ export class MessageProcessorService {
           const timeSinceClosed = Date.now() - new Date(recentlyClosedAttendance.finalizedAt).getTime();
           const minutesSinceClosed = Math.floor(timeSinceClosed / (60 * 1000));
 
-          if (minutesSinceClosed <= autoReopenTimeoutMinutes) {
+          if (minutesSinceClosed <= AUTO_REOPEN_TIMEOUT_MINUTES) {
             // Reabrir o atendimento fechado
             logger.info('Auto-reopening recently closed attendance', {
               attendanceId: recentlyClosedAttendance.id,
               clientPhone,
               minutesSinceClosed,
-              autoReopenTimeoutMinutes,
+              autoReopenTimeoutMinutes: AUTO_REOPEN_TIMEOUT_MINUTES,
               finalizedAt: recentlyClosedAttendance.finalizedAt,
             });
 
             // Restaurar estado anterior do aiContext se disponível (inclui handledBy e assumedAt para preservar timer da IA)
             const aiContext = recentlyClosedAttendance.aiContext as Record<string, unknown> | undefined;
+            const wasClosedManually = Boolean(aiContext?.closedManually);
             const previousState = aiContext?.previousStateBeforeClosing as {
               interventionType?: string;
               sellerSubdivision?: string;
@@ -230,6 +242,10 @@ export class MessageProcessorService {
             if (!restoredHandledBy) {
               restoredHandledBy = recentlyClosedAttendance.handledBy || AttendanceType.AI;
             }
+            if (wasClosedManually) {
+              // Regra: atendimento fechado manualmente não deve reativar follow-up ao reabrir automaticamente.
+              restoredHandledBy = AttendanceType.AI;
+            }
 
             // Reabrir o atendimento
             const now = new Date();
@@ -241,6 +257,12 @@ export class MessageProcessorService {
               balcaoClosingAt: null,
               ecommerceClosingAt: null,
               handledBy: restoredHandledBy, // CORREÇÃO: Sempre preservar/definir handledBy
+              aiContext: {
+                ...(aiContext ?? {}),
+                followUpState: {
+                  lastClientMessageAt: now.toISOString(),
+                },
+              },
             };
 
             if (restoredInterventionType) {
@@ -250,12 +272,13 @@ export class MessageProcessorService {
               updateData.sellerSubdivision = restoredSellerSubdivision;
             }
             // Preservar assumedAt - não resetar o timer da IA na reabertura
-            if (previousState?.assumedAt) {
+            if (wasClosedManually) {
+              updateData.assumedAt = null;
+            } else if (previousState?.assumedAt) {
               updateData.assumedAt = new Date(previousState.assumedAt);
             } else if (recentlyClosedAttendance.assumedAt) {
               updateData.assumedAt = recentlyClosedAttendance.assumedAt;
             }
-
             await attendanceRepo.update(
               { id: recentlyClosedAttendance.id },
               updateData
@@ -301,6 +324,9 @@ export class MessageProcessorService {
                 } else {
                   socketService.emitToRoom('supervisors', 'attendance:reopened', eventData);
                 }
+
+                invalidateSubdivisionCountsCache();
+                socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
                 logger.info('Socket.IO events emitted for auto-reopened attendance', {
                   attendanceId: attendance.id,
@@ -446,6 +472,12 @@ export class MessageProcessorService {
           const updateData: any = {
             updatedAt: new Date(),
             lastClientMessageAt: whatsappMessage.timestamp,
+            aiContext: {
+              ...((attendance.aiContext as Record<string, unknown>) ?? {}),
+              followUpState: {
+                lastClientMessageAt: whatsappMessage.timestamp.toISOString(),
+              },
+            },
           };
         
           // Se estava aguardando cliente, voltar para EM_ATENDIMENTO
@@ -657,6 +689,9 @@ export class MessageProcessorService {
             updatedAt: attendance.updatedAt.toISOString(),
             unassignedFilter,
           });
+
+          invalidateSubdivisionCountsCache();
+          socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
           logger.info('✅ Socket.IO: new_unassigned_message emitido com sucesso', {
             attendanceId: attendance.id,
@@ -943,6 +978,117 @@ export class MessageProcessorService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Processa mensagem enviada pelo dono do número direto do celular (fora da plataforma).
+   * Exibe na plataforma com o nome do dono acima do push name.
+   */
+  private async processOwnerMessageFromPhone(whatsappMessage: WhatsAppMessage): Promise<void> {
+    const attendanceRepo = AppDataSource.getRepository(Attendance);
+    const messageRepo = AppDataSource.getRepository(Message);
+
+    const attendance = await attendanceRepo.findOne({
+      where: [
+        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.TRIAGEM },
+        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.ABERTO },
+        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.EM_ATENDIMENTO },
+        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.AGUARDANDO_CLIENTE },
+      ],
+      order: { updatedAt: 'DESC' },
+      relations: ['seller'],
+    });
+
+    if (!attendance) {
+      logger.info('Owner message from phone: no active attendance found, skipping', {
+        clientPhone: whatsappMessage.phoneNumber,
+        messageId: whatsappMessage.id,
+      });
+      return;
+    }
+
+    const messageTimestamp = whatsappMessage.timestamp instanceof Date ? whatsappMessage.timestamp : new Date(whatsappMessage.timestamp);
+    const mediaTypeForContent = whatsappMessage.mediaType || 'text';
+    const displayContent =
+      mediaTypeForContent === 'image' ? (whatsappMessage.text && whatsappMessage.text !== '[Processando imagem...]' ? whatsappMessage.text : '[Imagem]')
+      : mediaTypeForContent === 'audio' ? (whatsappMessage.text && whatsappMessage.text !== '[Processando áudio...]' ? whatsappMessage.text : '[Áudio]')
+      : (whatsappMessage.text || '[Mensagem de mídia]');
+
+    const message = messageRepo.create({
+      attendanceId: attendance.id,
+      origin: MessageOrigin.SELLER,
+      content: displayContent,
+      metadata: {
+        whatsappMessageId: whatsappMessage.id,
+        fromMe: true,
+        ownerPushName: whatsappMessage.ownerPushName || 'Dono',
+        fromJid: whatsappMessage.from,
+        mediaUrl: whatsappMessage.mediaUrl,
+        mediaType: whatsappMessage.mediaType,
+        originalTimestamp: messageTimestamp.toISOString(),
+      },
+      sentAt: messageTimestamp,
+    });
+
+    await messageRepo.save(message);
+
+    // Ativar/atualizar timer de 1 hora desligada: handledBy = HUMAN, assumedAt = now
+    // Cada nova msg fromMe reseta o timer para mais 1 hora
+    const now = new Date();
+    attendance.handledBy = AttendanceType.HUMAN;
+    attendance.assumedAt = now;
+    attendance.updatedAt = now;
+    await attendanceRepo.save(attendance);
+
+    const ownerName = whatsappMessage.ownerPushName || 'Dono';
+    const basePayload = {
+      attendanceId: attendance.id,
+      messageId: message.id,
+      clientPhone: attendance.clientPhone,
+      isUnassigned: !attendance.sellerId,
+      handledBy: 'HUMAN',
+      sender: ownerName,
+      fromMe: true,
+      assumedAt: now.toISOString(),
+      ...(attendance.sellerId && { sellerId: attendance.sellerId }),
+      ...(attendance.sellerId && attendance.sellerSubdivision && { sellerSubdivision: attendance.sellerSubdivision }),
+      message: {
+        id: message.id,
+        content: message.content,
+        origin: message.origin,
+        sentAt: message.sentAt.toISOString(),
+        metadata: { ...message.metadata, sentAt: message.sentAt.toISOString(), createdAt: message.sentAt.toISOString() },
+      },
+    };
+
+    if (!attendance.sellerId) {
+      socketService.emitToRoom('supervisors', 'message_received', basePayload);
+    } else {
+      socketService.emitToRoom(`seller_${attendance.sellerId}`, 'message_received', basePayload);
+      socketService.emitToRoom('supervisors', 'message_received', basePayload);
+    }
+
+    // Emitir attendance_assumed para ativar/atualizar timer de 1h no frontend
+    try {
+      const eventData = {
+        attendanceId: attendance.id,
+        handledBy: 'HUMAN',
+        assumedBy: ownerName,
+        assumedAt: now.toISOString(),
+      };
+      if (attendance.sellerId) {
+        socketService.emitToRoom(`seller_${attendance.sellerId}`, 'attendance_assumed', eventData);
+      }
+      socketService.emitToRoom('supervisors', 'attendance_assumed', eventData);
+    } catch (e: any) {
+      logger.warn('Failed to emit attendance_assumed for fromMe message', { error: e?.message, attendanceId: attendance.id });
+    }
+
+    logger.info('Owner message from phone saved and emitted', {
+      messageId: message.id,
+      attendanceId: attendance.id,
+      ownerName,
+    });
   }
 
   /**

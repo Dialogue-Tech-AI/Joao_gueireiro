@@ -5,6 +5,7 @@ import { User } from '../../../auth/domain/entities/user.entity';
 import { VehicleBrand, UserRole, OperationalState } from '../../../../shared/types/common.types';
 import { logger } from '../../../../shared/utils/logger';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
 const FC_NAME = 'identificamarca';
@@ -257,6 +258,8 @@ export function createIdentificarMarcaProcessor(): FunctionCallProcessorHandler 
         socketService.emitToRoom(`seller_${selectedSeller.id}`, 'attendance:routed', routingEventData);
         // Emitir para supervisores
         socketService.emitToRoom('supervisors', 'attendance:routed', routingEventData);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         // CORREÇÃO: Remover broadcasts globais para evitar notificações duplicadas e mistura de eventos
         
         logger.info(`${FC_NAME}: attendance:routed emitido via Socket.IO para seller e supervisors rooms`);

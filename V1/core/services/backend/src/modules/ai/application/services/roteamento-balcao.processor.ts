@@ -3,6 +3,7 @@ import { Attendance } from '../../../attendance/domain/entities/attendance.entit
 import { logger } from '../../../../shared/utils/logger';
 import { redisService } from '../../../../shared/infrastructure/redis/redis.service';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
 const INTERVENTION_TYPE = 'encaminhados-balcao';
@@ -56,6 +57,8 @@ export function createRoteamentoBalcaoProcessor(): FunctionCallProcessorHandler 
 
       try {
         socketService.emitToRoom('supervisors', 'attendance:moved-to-intervention', eventPayload);
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         logger.info('roteamentobalcao: attendance:moved-to-intervention emitido via Socket.IO (tempo real)');
       } catch (e: any) {
         logger.error('roteamentobalcao: erro ao emitir Socket.IO', { error: e?.message });

@@ -58,7 +58,7 @@ export const LoginPage: React.FC = () => {
               <span className="material-symbols-outlined text-white text-2xl">corporate_fare</span>
             </div>
             <span className="text-xl font-bold tracking-tighter text-navy-custom dark:text-white uppercase">
-              Altese <span className="text-primary">Autopeças</span>
+              <span className="text-primary">Plataforma</span>
             </span>
           </div>
 
@@ -89,7 +89,7 @@ export const LoginPage: React.FC = () => {
                     onChange={(e) => setEmail(e.target.value)}
                     required
                     className="block w-full border-0 p-0 text-slate-900 dark:text-white placeholder-slate-300 dark:placeholder-slate-600 focus:ring-0 bg-transparent text-sm font-medium"
-                    placeholder="colaborador@altese.com.br"
+                    placeholder="colaborador@plataforma.com.br"
                     autoComplete="email"
                   />
                 </div>
@@ -157,7 +157,7 @@ export const LoginPage: React.FC = () => {
 
           <div className="max-w-md w-full mx-auto text-center mt-10">
             <p className="text-[10px] text-slate-400 leading-relaxed uppercase tracking-wider font-medium">
-              Uso exclusivo para colaboradores Altese. <br />
+              Uso exclusivo para colaboradores da plataforma. <br />
               Em caso de dúvidas, entre em contato com o suporte de TI.
             </p>
           </div>

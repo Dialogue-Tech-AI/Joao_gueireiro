@@ -43,10 +43,14 @@ const upload = multer({
   },
 });
 
+const subdivisionCountsCache = new Map<string, { expiresAt: number; counts: Record<string, number> }>();
+
+export function invalidateSubdivisionCountsCache(): void {
+  subdivisionCountsCache.clear();
+}
+
 export class AttendanceController {
   public router: Router;
-  // Cache curto para aliviar endpoints com polling intenso no dashboard
-  private subdivisionCountsCache = new Map<string, { expiresAt: number; counts: Record<string, number> }>();
   private attributedConversationsCache = new Map<string, { expiresAt: number; conversations: any[] }>();
 
   constructor() {
@@ -313,8 +317,8 @@ export class AttendanceController {
 
         let sender = 'Cliente';
         if (isFromSystem) sender = 'Sistema';
-        else if (isFromAI) sender = 'Altese AI';
-        else if (isFromSeller) sender = senderMap.get(message.metadata?.sentBy as UUID) || 'Vendedor';
+        else if (isFromAI) sender = 'AI';
+        else if (isFromSeller) sender = message.metadata?.ownerPushName || senderMap.get(message.metadata?.sentBy as UUID) || 'Vendedor';
         else if (isClient && message.metadata?.pushName) sender = String(message.metadata.pushName);
 
         const item = {
@@ -758,9 +762,8 @@ export class AttendanceController {
         a.interventionType !== 'demanda-telefone-fixo' &&
         a.interventionType !== 'encaminhados-ecommerce' &&
         a.interventionType !== 'encaminhados-balcao' &&
-        a.interventionType !== 'garantia' &&
-        a.interventionType !== 'troca' &&
-        a.interventionType !== 'estorno';
+        a.interventionType !== 'protese-capilar' &&
+        a.interventionType !== 'outros-assuntos';
 
       /** Triagem = apenas operationalState TRIAGEM (estado inicial). identificamarca roteia → ABERTO + sellerId → sai da triagem. */
       const isTriagemState = (a: Attendance) =>
@@ -1120,9 +1123,8 @@ export class AttendanceController {
   private static interventionTypeLabel(type: string): string {
     const map: Record<string, string> = {
       'demanda-telefone-fixo': 'Demanda telefone fixo',
-      'garantia': 'Garantia',
-      'troca': 'Troca',
-      'estorno': 'Estorno',
+      'protese-capilar': 'Protese capilar',
+      'outros-assuntos': 'Outros assuntos',
       'casos_gerentes': 'Casos gerentes',
     };
     return map[type] ?? type.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
@@ -1187,7 +1189,7 @@ export class AttendanceController {
         )
         .orderBy('a.updated_at', 'DESC');
 
-      const interventionTypes = ['demanda-telefone-fixo', 'garantia', 'troca', 'estorno'];
+      const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'];
       if (sellerIds.length) {
         qb.andWhere(
           '(a.seller_id IN (:...sellerIds) OR a.intervention_type IN (:...interventionTypes))',
@@ -1286,6 +1288,7 @@ export class AttendanceController {
             vehicleBrand: attendance.vehicleBrand,
             createdAt: attendance.createdAt.toISOString(),
             updatedAt: attendance.updatedAt.toISOString(),
+            interventionType: attendance.interventionType ?? undefined,
             interventionData: attendance.interventionData ?? undefined,
             attributionSource,
             sellerSubdivision: attendance.sellerSubdivision,
@@ -1537,7 +1540,7 @@ export class AttendanceController {
   /**
    * Get active attendance counts per subdivision (for supervisor sidebar).
    * Ativos = isFinalized: false.
-   * Keys: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, garantia, troca, estorno, seller-{id}-{sub}.
+   * Keys: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, outros-assuntos, garantia, troca, estorno, seller-{id}-{sub}.
    */
   private async getSubdivisionCounts(req: Request, res: Response): Promise<void> {
     try {
@@ -1547,10 +1550,13 @@ export class AttendanceController {
         return;
       }
       const countsCacheKey = `sup:${supervisorId}`;
-      const cachedCounts = this.subdivisionCountsCache.get(countsCacheKey);
-      if (cachedCounts && cachedCounts.expiresAt > Date.now()) {
-        res.json({ success: true, counts: cachedCounts.counts });
-        return;
+      const bustCache = req.query.bust === '1';
+      if (!bustCache) {
+        const cachedCounts = subdivisionCountsCache.get(countsCacheKey);
+        if (cachedCounts && cachedCounts.expiresAt > Date.now()) {
+          res.json({ success: true, counts: cachedCounts.counts });
+          return;
+        }
       }
       const userRepo = AppDataSource.getRepository(User);
       const sup = await userRepo.findOne({ where: { id: supervisorId as UUID } });
@@ -1565,9 +1571,8 @@ export class AttendanceController {
         a.interventionType !== 'demanda-telefone-fixo' &&
         a.interventionType !== 'encaminhados-ecommerce' &&
         a.interventionType !== 'encaminhados-balcao' &&
-        a.interventionType !== 'garantia' &&
-        a.interventionType !== 'troca' &&
-        a.interventionType !== 'estorno';
+        a.interventionType !== 'protese-capilar' &&
+        a.interventionType !== 'outros-assuntos';
       const isTriagemState = (a: Attendance) =>
         a.operationalState === OperationalState.TRIAGEM || a.operationalState == null;
 
@@ -1583,7 +1588,7 @@ export class AttendanceController {
       counts['encaminhados-ecommerce'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-ecommerce').length;
       counts['encaminhados-balcao'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-balcao').length;
 
-      const interventionTypes = ['demanda-telefone-fixo', 'garantia', 'troca', 'estorno'] as const;
+      const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
       const interventionRows = await attendanceRepo
         .createQueryBuilder('a')
         .select('a.intervention_type', 'interventionType')
@@ -1634,6 +1639,17 @@ export class AttendanceController {
         });
       }
       counts['attributed'] = await attributedQb.getCount();
+
+      // Total "Abertos": todos os atendimentos não fechados visíveis ao supervisor
+      const openQb = attendanceRepo
+        .createQueryBuilder('a')
+        .where('a.is_finalized = :fin', { fin: false })
+        .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+        .andWhere(
+          '(a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId))',
+          { supervisorId }
+        );
+      counts['abertos'] = await openQb.getCount();
       
       // Contar APENAS pendências (quote_requests) por subdivisão
       // "Todas as Demandas" exibe quote_requests, não conversas de chat
@@ -1692,7 +1708,69 @@ export class AttendanceController {
         .getRawOne();
       counts['fechados'] = parseInt(fechadosCountResult?.count || '0', 10);
 
-      this.subdivisionCountsCache.set(countsCacheKey, {
+      // Contagens Follow up (fluxo 1h/24h/36h):
+      // - inativo-1h: >1h sem resposta e aguardando 1º follow-up
+      // - inativo-12h: já recebeu 1º follow-up e aguarda 2º (24h)
+      // - inativo-24h: já recebeu 2º follow-up e permanece até 36h de inatividade
+      // - follow-up: soma das 3 fases acima
+      const followUpBaseWhere =
+        "a.is_finalized = :fin AND a.operational_state = :awaitingClient AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at) AND NOT (a.intervention_type IS NOT NULL AND COALESCE((SELECT m.origin FROM messages m WHERE m.attendance_id = a.id ORDER BY m.sent_at DESC LIMIT 1), :clientOrigin) != :clientOrigin)";
+      const followUpParams = {
+        fin: false,
+        awaitingClient: OperationalState.AGUARDANDO_CLIENTE,
+        supervisorId,
+        clientOrigin: MessageOrigin.CLIENT,
+        aiOrigin: MessageOrigin.AI,
+        sellerOrigin: MessageOrigin.SELLER,
+      };
+      const oneHourAgo = new Date();
+      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      const thirtySixHoursAgo = new Date();
+      thirtySixHoursAgo.setHours(thirtySixHoursAgo.getHours() - 36);
+
+      counts['inativo-1h'] = await attendanceRepo
+        .createQueryBuilder('a')
+        .where(
+          followUpBaseWhere +
+            " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :oneHourAgo",
+          {
+            ...followUpParams,
+            oneHourAgo,
+          }
+        )
+        .getCount();
+
+      const twelveHoursAgo = new Date();
+      twelveHoursAgo.setHours(twelveHoursAgo.getHours() - 12);
+      counts['inativo-12h'] = await attendanceRepo
+        .createQueryBuilder('a')
+        .where(
+          followUpBaseWhere +
+            " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL AND ((a.ai_context #>> '{followUpState,firstSentAt}')::timestamp) < :twelveHoursAgo",
+          {
+            ...followUpParams,
+            twelveHoursAgo,
+          }
+        )
+        .getCount();
+
+      counts['inativo-24h'] = await attendanceRepo
+        .createQueryBuilder('a')
+        .where(
+          followUpBaseWhere +
+            " AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NOT NULL AND a.last_client_message_at >= :thirtySixHoursAgo",
+          {
+            ...followUpParams,
+            thirtySixHoursAgo,
+          }
+        )
+        .getCount();
+      counts['follow-up'] =
+        (counts['inativo-1h'] ?? 0) +
+        (counts['inativo-12h'] ?? 0) +
+        (counts['inativo-24h'] ?? 0);
+
+      subdivisionCountsCache.set(countsCacheKey, {
         counts,
         expiresAt: Date.now() + 15000, // 15s
       });
@@ -1765,8 +1843,9 @@ export class AttendanceController {
         : null;
 
       const attendanceRepo = AppDataSource.getRepository(Attendance);
+      // Inclui: atribuídos ao supervisor, atribuídos a vendedores do supervisor, OU não atribuídos (AI)
       const visibilityWhere =
-        '(a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId))';
+        '(a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId) OR a.seller_id IS NULL)';
 
       const makeBaseQuery = () => {
         const qb = attendanceRepo
@@ -1803,6 +1882,14 @@ export class AttendanceController {
         .groupBy('a.vehicle_brand')
         .getRawMany<{ brand: VehicleBrand | null; count: string }>();
 
+      const byInterventionRows = await makeBaseQuery()
+        .andWhere('a.created_at BETWEEN :from AND :to', { from: fromDate, to: toDate })
+        .andWhere('a.intervention_type IS NOT NULL')
+        .select('a.intervention_type', 'interventionType')
+        .addSelect('COUNT(*)', 'count')
+        .groupBy('a.intervention_type')
+        .getRawMany<{ interventionType: string | null; count: string }>();
+
       const byBrand: Record<string, number> = {};
       for (const brand of validBrands) byBrand[brand] = 0;
       for (const row of byBrandRows) {
@@ -1811,6 +1898,28 @@ export class AttendanceController {
         }
       }
 
+      const trackedInterventionTypes = [
+        'protese-capilar',
+        'demanda-telefone-fixo',
+        'outros-assuntos',
+      ] as const;
+
+      const byIntervention: Record<string, number> = {};
+      for (const type of trackedInterventionTypes) byIntervention[type] = 0;
+      const trackedInterventionSet = new Set<string>(trackedInterventionTypes as readonly string[]);
+      for (const row of byInterventionRows) {
+        if (row.interventionType && trackedInterventionSet.has(row.interventionType)) {
+          byIntervention[row.interventionType] = parseInt(row.count, 10) || 0;
+        }
+      }
+
+      // Atendimentos não classificados: fechados (FECHADO_OPERACIONAL) sem nenhuma function call (intervention_type IS NULL)
+      const unclassifiedCount = await makeBaseQuery()
+        .andWhere('a.created_at BETWEEN :from AND :to', { from: fromDate, to: toDate })
+        .andWhere('a.operational_state = :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+        .andWhere('a.intervention_type IS NULL')
+        .getCount();
+
       res.json({
         success: true,
         stats: {
@@ -1818,6 +1927,8 @@ export class AttendanceController {
           filteredAttendances,
           totalAttendances,
           byBrand,
+          byIntervention,
+          unclassifiedCount,
         },
         filters: {
           from: fromDate.toISOString(),
@@ -1905,17 +2016,24 @@ export class AttendanceController {
       // Get pagination parameters
       const limit = parseInt(req.query.limit as string) || 15;
       const offset = parseInt(req.query.offset as string) || 0;
-      const totalCount = await messageRepo.count({
-        where: { attendanceId: attendanceId as UUID },
-      });
 
       // Get messages for this attendance with pagination
       // Using query builder with DISTINCT to avoid duplicates at DB level
       const queryBuilder = messageRepo
         .createQueryBuilder('message')
         .where('message.attendanceId = :attendanceId', { attendanceId })
+        // Ocultar mensagens legadas de realocação em qualquer visualização de chat.
+        .andWhere(
+          "NOT (message.origin = :systemOrigin AND ((message.metadata ->> 'type') = :relType OR message.content LIKE :relPrefix))",
+          {
+            systemOrigin: MessageOrigin.SYSTEM,
+            relType: 'relocation',
+            relPrefix: '🔁 Conversa realocada para%',
+          }
+        )
         .orderBy('message.sentAt', 'ASC')
         .addOrderBy('message.id', 'ASC'); // Secondary sort by ID for stability
+      const totalCount = await queryBuilder.getCount();
       
       let messages;
       if (offset === 0) {
@@ -1974,8 +2092,10 @@ export class AttendanceController {
         if (isFromSystem) {
           sender = 'Sistema';
         } else if (isFromSeller) {
-          // Try to get sender name from seller relationship or from sentBy metadata
-          if (attendance.seller?.name) {
+          // Mensagem do dono enviada do celular (fora da plataforma)
+          if (message.metadata?.ownerPushName) {
+            sender = String(message.metadata.ownerPushName);
+          } else if (attendance.seller?.name) {
             sender = attendance.seller.name;
           } else if (message.metadata?.sentBy) {
             // If no seller relationship, try to get user name from sentBy
@@ -1990,7 +2110,7 @@ export class AttendanceController {
             sender = 'Vendedor';
           }
         } else if (isFromAI) {
-          sender = 'Altese AI';
+          sender = 'AI';
         } else if (isClient && message.metadata?.pushName) {
           sender = message.metadata.pushName;
         }
@@ -2512,6 +2632,9 @@ export class AttendanceController {
       // Delete attendance (messages will be cascade deleted due to foreign key constraints)
       await attendanceRepo.delete(attendanceId as UUID);
 
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+
       logger.info('Attendance deleted successfully', {
         attendanceId,
         deletedBy: userId,
@@ -2621,6 +2744,9 @@ export class AttendanceController {
         });
       }
 
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+
       res.json({ 
         success: true, 
         message: 'Attendance assumed successfully',
@@ -2727,6 +2853,9 @@ export class AttendanceController {
         socketService.emitToRoom(`seller_${previousSellerId}`, 'attendance:routed', eventData);
       }
       socketService.emitToRoom('supervisors', 'attendance:routed', eventData);
+
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
       res.json({ success: true, attendanceId: attendance.id, sellerId: attendance.sellerId });
     } catch (error: any) {
@@ -2855,6 +2984,9 @@ export class AttendanceController {
         });
       }
 
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+
       res.json({ 
         success: true, 
         message: 'Attendance returned to AI successfully',
@@ -2911,6 +3043,16 @@ export class AttendanceController {
         res.json({ 
           remainingSeconds: 0,
           isActive: false,
+        });
+        return;
+      }
+
+      // Se a IA está permanentemente desligada, não mostrar timer (não vai retornar para IA)
+      if (attendance.aiDisabledUntil && new Date(attendance.aiDisabledUntil).getFullYear() > 2100) {
+        res.json({
+          remainingSeconds: 0,
+          isActive: false,
+          aiPermanentlyDisabled: true,
         });
         return;
       }
@@ -3154,71 +3296,34 @@ export class AttendanceController {
       const chatName = interventionType === 'demanda-telefone-fixo'
         ? 'Demanda telefone fixo'
         : interventionType.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
-      const systemContent = `🔁 Conversa realocada para ${chatName}`;
 
-      const qr = AppDataSource.createQueryRunner();
-      await qr.connect();
-      await qr.startTransaction();
-      try {
-        const attLocked = await qr.manager.findOne(Attendance, {
-          where: { id: attendanceId as UUID },
-          lock: { mode: 'pessimistic_write' },
+      // Mensagens legadas de realocação no chat foram descontinuadas.
+      // Mantemos apenas a notificação do dropdown (sem criar Message de sistema).
+      const notificationRepo = AppDataSource.getRepository(Notification);
+      const existingNotif = await notificationRepo.findOne({
+        where: {
+          userId: userId as UUID,
+          attendanceId: attendanceId as UUID,
+          type: NotificationType.ATTENDANCE_RELOCATED_INTERVENTION,
+        },
+      });
+      if (!existingNotif) {
+        const title = 'Conversa realocada';
+        const message = `Uma conversa foi realocada para ${chatName}.`;
+        await notificationService.createNotification({
+          userId: userId as UUID,
+          type: NotificationType.ATTENDANCE_RELOCATED_INTERVENTION,
+          title,
+          message,
+          attendanceId: attendanceId as UUID,
+          referenceId: `relocation-${attendanceId}`,
+          metadata: { interventionType },
         });
-        if (!attLocked) {
-          await qr.rollbackTransaction();
-          res.status(404).json({ error: 'Attendance not found' });
-          return;
-        }
-
-        const existingMsg = await qr.manager.findOne(Message, {
-          where: {
-            attendanceId: attendanceId as UUID,
-            origin: MessageOrigin.SYSTEM,
-            content: systemContent,
-          },
-        });
-        if (!existingMsg) {
-          const systemMessage = qr.manager.create(Message, {
-            attendanceId: attendanceId as UUID,
-            origin: MessageOrigin.SYSTEM,
-            content: systemContent,
-            status: MessageStatus.SENT,
-            metadata: { type: 'relocation', interventionType },
-          });
-          await qr.manager.save(Message, systemMessage);
-        }
-
-        const existingNotif = await qr.manager.findOne(Notification, {
-          where: {
-            userId: userId as UUID,
-            attendanceId: attendanceId as UUID,
-            type: NotificationType.ATTENDANCE_RELOCATED_INTERVENTION,
-          },
-        });
-        if (!existingNotif) {
-          await qr.commitTransaction();
-          const title = 'Conversa realocada';
-          const message = `Uma conversa foi realocada para ${chatName}.`;
-          await notificationService.createNotification({
-            userId: userId as UUID,
-            type: NotificationType.ATTENDANCE_RELOCATED_INTERVENTION,
-            title,
-            message,
-            attendanceId: attendanceId as UUID,
-            referenceId: `relocation-${attendanceId}`,
-            metadata: { interventionType },
-          });
-        } else {
-          await qr.commitTransaction();
-        }
-      } catch (txErr: any) {
-        await qr.rollbackTransaction();
-        throw txErr;
-      } finally {
-        await qr.release();
+        res.json({ success: true, created: true });
+        return;
       }
 
-      res.json({ success: true, created: true });
+      res.json({ success: true, created: false });
     } catch (error: any) {
       logger.error('relocation-seen error', { error: error.message, attendanceId: req.params.attendanceId });
       res.status(500).json({ error: 'Internal server error' });
@@ -3338,6 +3443,9 @@ export class AttendanceController {
         ...attendance.aiContext,
         previousStateBeforeClosing: previousState,
         closedAt: new Date().toISOString(),
+        closedManually: true,
+        closedManuallyBy: userId,
+        closedManuallyRole: user.role,
       };
 
       // Fechar atendimento
@@ -3384,6 +3492,9 @@ export class AttendanceController {
       } catch (e: any) {
         logger.warn('Failed to publish close_summary for attendance', { attendanceId: attendance.id, error: e?.message });
       }
+
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
       res.json({ 
         success: true, 

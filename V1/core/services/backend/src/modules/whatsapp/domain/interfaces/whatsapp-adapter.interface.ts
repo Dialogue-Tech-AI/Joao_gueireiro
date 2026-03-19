@@ -10,6 +10,10 @@ export interface WhatsAppMessage {
   pushName?: string; // Contact name from WhatsApp
   participantJid?: string; // For group messages
   whatsappNumberId: string; // ID of the WhatsApp number that received the message
+  /** Quando true: mensagem enviada pelo dono do número direto do celular (fora da plataforma) */
+  fromMe?: boolean;
+  /** Nome do dono do número (pushName do perfil) quando fromMe=true */
+  ownerPushName?: string;
 }
 
 export interface IWhatsAppAdapter {

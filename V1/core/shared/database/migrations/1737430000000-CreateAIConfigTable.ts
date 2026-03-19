@@ -59,7 +59,7 @@ export class CreateAIConfigTable1737430000000 implements MigrationInterface {
     // Insert default values
     await queryRunner.query(`
       INSERT INTO ai_config (key, value, metadata) VALUES
-      ('agent_prompt', '', '{"version": "1.0", "description": "Prompt base do agente Altese"}'),
+      ('agent_prompt', '', '{"version": "1.0", "description": "Prompt base do agente"}'),
       ('pending_functions', '{}', '{"version": "1.0", "description": "Configurações das function calls de pendências"}')
       ON CONFLICT (key) DO NOTHING;
     `);

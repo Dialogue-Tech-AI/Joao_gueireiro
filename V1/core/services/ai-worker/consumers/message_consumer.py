@@ -440,7 +440,7 @@ class MessageConsumer:
             )
             
             # Construir prompt para a IA gerar explicação
-            system_prompt = """Você é um assistente de vendas da Altese. Um vendedor acabou de enviar um orçamento para o cliente.
+            system_prompt = """Você é um assistente de vendas. Um vendedor acabou de enviar um orçamento para o cliente.
 
 Sua tarefa é:
 1. Ler o conteúdo do orçamento enviado pelo vendedor

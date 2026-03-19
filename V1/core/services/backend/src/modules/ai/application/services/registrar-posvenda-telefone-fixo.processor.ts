@@ -4,7 +4,9 @@ import { AttendanceCase } from '../../../attendance/domain/entities/attendance-c
 import { CaseType } from '../../../attendance/domain/entities/case-type.entity';
 import { CaseStatus } from '../../../../shared/types/common.types';
 import { logger } from '../../../../shared/utils/logger';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { redisService } from '../../../../shared/infrastructure/redis/redis.service';
+import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 import { canCreateNewCase } from './case-creation.utils';
 
@@ -93,6 +95,8 @@ export function createRegistrarPosVendaTelefoneFixoProcessor(): FunctionCallProc
             channel: 'attendance:intervention-assigned',
             payload,
           });
+          invalidateSubdivisionCountsCache();
+          socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         } catch (pubErr: any) {
           logger.error('registrarposvendatelefonefixo: ERRO ao publicar no Redis', {
             error: pubErr?.message,

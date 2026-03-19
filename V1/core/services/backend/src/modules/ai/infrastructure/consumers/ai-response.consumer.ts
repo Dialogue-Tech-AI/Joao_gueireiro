@@ -10,6 +10,7 @@ import { Not } from 'typeorm';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import { logger } from '../../../../shared/utils/logger';
 import crypto from 'crypto';
+import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 
 interface AIResponse {
   attendanceId: UUID;
@@ -387,10 +388,11 @@ export class AIResponseConsumer {
               includeName,
             });
             
+            // Não incluir "Altese AI:" no WhatsApp - apenas usuários (vendedores) têm prefixo
             await adapter.sendMessage(
               data.clientPhone, 
               fragment,
-              includeName ? aiSenderName : undefined
+              undefined
             );
 
             // Update status to SENT
@@ -495,10 +497,11 @@ export class AIResponseConsumer {
             shouldIncludeName,
           });
           
+          // Não incluir "Altese AI:" no WhatsApp - apenas usuários (vendedores) têm prefixo
           await adapter.sendMessage(
             data.clientPhone, 
             data.content,
-            shouldIncludeName ? aiSenderName : undefined // Include name only if sender changed
+            undefined
           );
 
           // Update status to SENT
@@ -630,6 +633,8 @@ export class AIResponseConsumer {
           routedAt: new Date().toISOString(),
           sellerSubdivision: attendance?.sellerSubdivision || 'pedidos-orcamentos',
         });
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
       }
     } catch (error: any) {
       logger.error('Error processing AI response', {

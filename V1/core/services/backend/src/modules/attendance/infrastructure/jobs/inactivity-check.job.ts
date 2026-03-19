@@ -47,8 +47,8 @@ export class InactivityCheckJob {
    */
   private async run(): Promise<void> {
     try {
-      // Check and close inactive attendances (waiting for client)
-      const closedCount = await this.inactivityService.checkAndCloseInactiveAttendances();
+      // Check and send follow-up for inactive attendances (waiting for client)
+      const followUpsSent = await this.inactivityService.checkAndCloseInactiveAttendances();
       // Close attendances where all cases are resolved/cancelled
       const closedByCases = await this.inactivityService.tryCloseByCasesResolved();
       // Check and return inactive assumed attendances to AI (1 hour without human messages)
@@ -62,9 +62,9 @@ export class InactivityCheckJob {
       // Check and close attendances by subdivision inactivity (configurable per subdivision)
       const closedBySubdivisionInactivity = await this.inactivityService.checkAndCloseBySubdivisionInactivity();
       
-      if (closedCount > 0 || closedByCases > 0 || returnedCount > 0 || closedByBalcaoTimer > 0 || closedByBalcaoInactivity > 0 || closedByEcommerceTimer > 0 || closedBySubdivisionInactivity > 0) {
+      if (followUpsSent > 0 || closedByCases > 0 || returnedCount > 0 || closedByBalcaoTimer > 0 || closedByBalcaoInactivity > 0 || closedByEcommerceTimer > 0 || closedBySubdivisionInactivity > 0) {
         logger.info('Inactivity check job completed', { 
-          closedCount,
+          followUpsSent,
           closedByCases,
           returnedCount,
           closedByBalcaoTimer,

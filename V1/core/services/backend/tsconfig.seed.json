@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "baseUrl": ".",
+    "typeRoots": ["./node_modules/@types"],
+    "paths": {
+      "@/*": ["src/*"],
+      "@modules/*": ["src/modules/*"],
+      "@shared/*": ["src/shared/*"],
+      "@config/*": ["src/config/*"],
+      "bcrypt": ["./node_modules/bcrypt"],
+      "typeorm": ["./node_modules/typeorm"]
+    }
+  },
+  "include": [
+    "scripts/**/*",
+    "../../shared/database/seed/**/*"
+  ]
+}
