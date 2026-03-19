@@ -11,6 +11,8 @@ COPY . .
 WORKDIR /app/services/backend
 RUN npm ci
 
-# node -r ts-node/register evita bug de resolucao do ts-node bin bootstrap
 ENV NODE_ENV=development
-CMD ["sh", "-c", "node -r ts-node/register scripts/db/run-migrations.ts && TS_NODE_PROJECT=tsconfig.seed.json NODE_PATH=./node_modules node -r ts-node/register scripts/seed/index.ts"]
+ENV NODE_PATH=/app/services/backend/node_modules
+ENV DOTENV_PATH=/dev/null
+
+CMD ["sh", "-c", "node -r ts-node/register scripts/db/run-migrations.ts && TS_NODE_PROJECT=tsconfig.seed.json node -r ts-node/register scripts/seed/index.ts"]
