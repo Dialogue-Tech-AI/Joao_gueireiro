@@ -11,6 +11,10 @@ COPY . .
 WORKDIR /app/services/backend
 RUN npm ci
 
+# Symlink para que arquivos em /app/shared/ encontrem node_modules
+# (TypeScript moduleResolution:"node" sobe a arvore ate /app/node_modules)
+RUN ln -s /app/services/backend/node_modules /app/node_modules
+
 ENV NODE_ENV=development
 ENV NODE_PATH=/app/services/backend/node_modules
 ENV DOTENV_PATH=/dev/null
