@@ -591,6 +591,35 @@ export const SupervisorDashboard: React.FC = () => {
     return (unclassifiedCount / supervisorStats.filteredAttendances) * 100;
   }, [unclassifiedCount, supervisorStats.filteredAttendances]);
 
+  const classificationChartBackground = useMemo(() => {
+    const slices = [
+      { color: '#0ea5e9', value: Math.max(0, protesePercentValue) },
+      { color: '#f59e0b', value: Math.max(0, manutencaoPercentValue) },
+      { color: '#d946ef', value: Math.max(0, outrosPercentValue) },
+      { color: '#94a3b8', value: Math.max(0, unclassifiedPercentValue) },
+    ];
+    const total = slices.reduce((sum, slice) => sum + slice.value, 0);
+    if (total <= 0) {
+      return 'conic-gradient(#e2e8f0 0% 100%)';
+    }
+
+    let current = 0;
+    const parts: string[] = [];
+    for (const slice of slices) {
+      if (slice.value <= 0) continue;
+      const start = current;
+      const normalized = (slice.value / total) * 100;
+      current = Math.min(100, current + normalized);
+      parts.push(`${slice.color} ${start.toFixed(2)}% ${current.toFixed(2)}%`);
+    }
+
+    if (current < 100) {
+      parts.push(`#e2e8f0 ${current.toFixed(2)}% 100%`);
+    }
+
+    return `conic-gradient(${parts.join(', ')})`;
+  }, [protesePercentValue, manutencaoPercentValue, outrosPercentValue, unclassifiedPercentValue]);
+
   const isSellerCurrentlyUnavailable = useCallback((seller: Seller) => {
     if (seller.isUnavailable === false) return false;
     if (!seller.unavailableUntil) return !!seller.isUnavailable;
@@ -5175,7 +5204,7 @@ export const SupervisorDashboard: React.FC = () => {
                         <h3 className="text-sm font-semibold text-slate-900 dark:text-white text-center mb-4">Percentuais por classificação</h3>
                         <div className="mx-auto w-48 h-48 rounded-full border-8 border-white/60 dark:border-slate-800/80 shadow-sm"
                           style={{
-                            background: `conic-gradient(#0ea5e9 0% ${protesePercentValue.toFixed(2)}%, #f59e0b ${protesePercentValue.toFixed(2)}% ${(protesePercentValue + manutencaoPercentValue).toFixed(2)}%, #d946ef ${(protesePercentValue + manutencaoPercentValue).toFixed(2)}% ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue).toFixed(2)}%, #94a3b8 ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue).toFixed(2)}% ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue + unclassifiedPercentValue).toFixed(2)}%, #e2e8f0 ${(protesePercentValue + manutencaoPercentValue + outrosPercentValue + unclassifiedPercentValue).toFixed(2)}% 100%)`,
+                            background: classificationChartBackground,
                           }}
                         />
                         <div className="mt-5 space-y-2 text-sm">
