@@ -19,9 +19,9 @@ echo "[1/4] Gerando chave privada..."
 openssl genrsa 2048 > origin.key
 chmod 600 origin.key
 
-# 2. Gerar CSR (PEM com newlines escapadas para JSON)
+# 2. Gerar CSR e salvar em arquivo (evita corrupção no pipe/shell)
 echo "[2/4] Gerando CSR..."
-CSR_PEM=$(openssl req -new -key origin.key -subj "/CN=*.dialoguetech.com.br" 2>/dev/null | awk '{printf "%s\\n", $0}')
+openssl req -new -key origin.key -subj "/CN=*.dialoguetech.com.br" -out csr.pem 2>/dev/null
 
 # 3. Chamar API Cloudflare
 echo "[3/4] Solicitando certificado na Cloudflare..."
@@ -37,16 +37,27 @@ else
   exit 1
 fi
 
-# Usar arquivo JSON para evitar problemas de escape
+# Montar JSON com CSR via Python (preserva newlines corretamente)
 TMP_JSON=$(mktemp)
-CSR_ESCAPED=$(echo "$CSR_PEM" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-echo "{\"csr\":$CSR_ESCAPED,\"hostnames\":[\"*.dialoguetech.com.br\",\"dialoguetech.com.br\"],\"request_type\":\"origin-rsa\",\"requested_validity\":5475}" > "$TMP_JSON"
+python3 - "$TMP_JSON" << 'PYEOF'
+import json, sys
+with open("csr.pem") as f:
+    csr = f.read()
+payload = {
+    "csr": csr,
+    "hostnames": ["*.dialoguetech.com.br", "dialoguetech.com.br"],
+    "request_type": "origin-rsa",
+    "requested_validity": 5475
+}
+with open(sys.argv[1], "w") as out:
+    json.dump(payload, out)
+PYEOF
 
 RESP=$(curl -s -X POST "https://api.cloudflare.com/client/v4/certificates" \
   -H "Content-Type: application/json" \
   -H "$AUTH_HEADER" \
   -d @"$TMP_JSON")
-rm -f "$TMP_JSON"
+rm -f "$TMP_JSON" csr.pem
 
 # 4. Extrair e salvar certificado
 if echo "$RESP" | grep -q '"success":true'; then
