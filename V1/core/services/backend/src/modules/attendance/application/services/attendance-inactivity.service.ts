@@ -48,6 +48,10 @@ export class AttendanceInactivityService {
         if (aiContext.closedManually) {
           continue;
         }
+        // Regra: manutenção (demanda-telefone-fixo) não entra no follow-up
+        if (attendance.interventionType === 'demanda-telefone-fixo') {
+          continue;
+        }
         const followUpState = (aiContext.followUpState ?? {}) as {
           lastClientMessageAt?: string;
           firstSentAt?: string;

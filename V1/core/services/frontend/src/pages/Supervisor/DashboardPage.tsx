@@ -4050,7 +4050,7 @@ export const SupervisorDashboard: React.FC = () => {
                 >
                   <span className="material-icons-round text-white">bolt</span>
                 </div>
-                <span className="text-lg font-bold tracking-tight">Plataforma</span>
+                <span className="text-lg font-bold tracking-tight">Fabio Guerreiro</span>
               </div>
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}

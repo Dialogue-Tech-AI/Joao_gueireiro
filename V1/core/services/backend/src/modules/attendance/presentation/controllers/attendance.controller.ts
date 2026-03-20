@@ -1714,7 +1714,7 @@ export class AttendanceController {
       // - inativo-24h: já recebeu 2º follow-up e permanece até 36h de inatividade
       // - follow-up: soma das 3 fases acima
       const followUpBaseWhere =
-        "a.is_finalized = :fin AND a.operational_state = :awaitingClient AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at) AND NOT (a.intervention_type IS NOT NULL AND COALESCE((SELECT m.origin FROM messages m WHERE m.attendance_id = a.id ORDER BY m.sent_at DESC LIMIT 1), :clientOrigin) != :clientOrigin)";
+        "a.is_finalized = :fin AND a.operational_state = :awaitingClient AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at) AND NOT (a.intervention_type IS NOT NULL AND COALESCE((SELECT m.origin FROM messages m WHERE m.attendance_id = a.id ORDER BY m.sent_at DESC LIMIT 1), :clientOrigin) != :clientOrigin)";
       const followUpParams = {
         fin: false,
         awaitingClient: OperationalState.AGUARDANDO_CLIENTE,
@@ -1882,13 +1882,35 @@ export class AttendanceController {
         .groupBy('a.vehicle_brand')
         .getRawMany<{ brand: VehicleBrand | null; count: string }>();
 
+      const trackedInterventionTypes = [
+        'protese-capilar',
+        'demanda-telefone-fixo',
+        'outros-assuntos',
+      ] as const;
+
+      // Classificação considera estado atual OU anterior (ao fechar, intervention_type é limpo e salvo em previousStateBeforeClosing)
+      const effectiveTypeExpr =
+        "COALESCE(a.intervention_type, (a.ai_context->'previousStateBeforeClosing'->>'interventionType'))";
+
+      const byIntervention: Record<string, number> = {};
+      for (const type of trackedInterventionTypes) byIntervention[type] = 0;
+
       const byInterventionRows = await makeBaseQuery()
         .andWhere('a.created_at BETWEEN :from AND :to', { from: fromDate, to: toDate })
-        .andWhere('a.intervention_type IS NOT NULL')
-        .select('a.intervention_type', 'interventionType')
+        .andWhere(`${effectiveTypeExpr} IN (:...trackedTypes)`, {
+          trackedTypes: [...trackedInterventionTypes],
+        })
+        .select(effectiveTypeExpr, 'interventionType')
         .addSelect('COUNT(*)', 'count')
-        .groupBy('a.intervention_type')
+        .groupBy(effectiveTypeExpr)
         .getRawMany<{ interventionType: string | null; count: string }>();
+
+      const trackedInterventionSet = new Set<string>(trackedInterventionTypes as readonly string[]);
+      for (const row of byInterventionRows) {
+        if (row.interventionType && trackedInterventionSet.has(row.interventionType)) {
+          byIntervention[row.interventionType] = parseInt(row.count, 10) || 0;
+        }
+      }
 
       const byBrand: Record<string, number> = {};
       for (const brand of validBrands) byBrand[brand] = 0;
@@ -1898,26 +1920,12 @@ export class AttendanceController {
         }
       }
 
-      const trackedInterventionTypes = [
-        'protese-capilar',
-        'demanda-telefone-fixo',
-        'outros-assuntos',
-      ] as const;
-
-      const byIntervention: Record<string, number> = {};
-      for (const type of trackedInterventionTypes) byIntervention[type] = 0;
-      const trackedInterventionSet = new Set<string>(trackedInterventionTypes as readonly string[]);
-      for (const row of byInterventionRows) {
-        if (row.interventionType && trackedInterventionSet.has(row.interventionType)) {
-          byIntervention[row.interventionType] = parseInt(row.count, 10) || 0;
-        }
-      }
-
-      // Atendimentos não classificados: fechados (FECHADO_OPERACIONAL) sem nenhuma function call (intervention_type IS NULL)
+      // Não classificados: atendimentos que NUNCA tiveram classificação (nem atual nem em previousStateBeforeClosing)
       const unclassifiedCount = await makeBaseQuery()
         .andWhere('a.created_at BETWEEN :from AND :to', { from: fromDate, to: toDate })
-        .andWhere('a.operational_state = :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
-        .andWhere('a.intervention_type IS NULL')
+        .andWhere(`(${effectiveTypeExpr} IS NULL OR ${effectiveTypeExpr} NOT IN (:...trackedTypes))`, {
+          trackedTypes: [...trackedInterventionTypes],
+        })
         .getCount();
 
       res.json({
