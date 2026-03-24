@@ -21,10 +21,12 @@ echo "=== 1. Atualizando código (git pull) ==="
 git fetch origin
 git pull origin master
 
-# Parar serviços (mantém volumes - dados do banco preservados)
+# Parar e remover containers (mantém volumes - dados do banco preservados)
 echo ""
-echo "=== 2. Parando containers ==="
-docker compose -f docker-compose.vps.yml down
+echo "=== 2. Parando e removendo containers ==="
+docker compose -f docker-compose.vps.yml down --remove-orphans
+# Remove containers órfãos que podem ter ficado de runs anteriores (ex: minio-init)
+docker rm -f guerreiros-minio-init 2>/dev/null || true
 
 # Subir tudo com rebuild - db-init roda migrations automaticamente antes do app
 echo ""
