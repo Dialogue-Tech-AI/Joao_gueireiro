@@ -8,7 +8,8 @@ O `docker-compose.vps.yml` publica o frontend em **8081** (HTTP) e **8444** (HTT
 
 Ficheiros:
 
-- **`joao-guerreiro.conf`** — configuração pronta (`server_name` = `atendimento-joaoguerreiro.dialoguetech.com.br`).
+- **`joao-guerreiro.conf`** — Nginx no **host** (443 livre): `server_name` = `atendimento-joaoguerreiro.dialoguetech.com.br` → `127.0.0.1:8081`.
+- **`joao-guerreiro-vhost-shared-443.conf`** — mesmo subdomínio quando a **443 já está** noutro contentor (ex.: `guerreiros-frontend`): proxy para `172.17.0.1:8081` (ajustar paths SSL).
 - **`install-nginx-host.sh`** — instala o pacote `nginx`, copia certs e ativa o site.
 
 ## Pré-requisitos
@@ -56,3 +57,42 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 curl -sI https://atendimento-joaoguerreiro.dialoguetech.com.br
 ```
+
+---
+
+## Quando a 443 já está noutro contentor (ex.: `guerreiros-frontend`)
+
+Neste cenário **não** podes instalar Nginx no host na mesma porta 443. O tráfego HTTPS entra no Nginx **dentro** do contentor que já publica `80` e `443`. Esse Nginx escolhe o site pelo header `Host`; sem um `server_name` para `atendimento-joaoguerreiro.dialoguetech.com.br`, o pedido cai no *default* (ex.: login do Fabio).
+
+1. Garante que o João está a ouvir no host em **8081** (`docker ps` → `0.0.0.0:8081->80` no `joao_guerreiro-frontend`).
+
+2. No contentor que serve a 443, descobre onde estão os certificados SSL de um vhost que já funcione:
+
+   ```bash
+   docker exec guerreiros-frontend sh -c "grep -R ssl_certificate /etc/nginx/ 2>/dev/null | head -20"
+   ```
+
+3. Copia o ficheiro **`joao-guerreiro-vhost-shared-443.conf`** para esse contentor e edita **só** as linhas `ssl_certificate` / `ssl_certificate_key` para coincidirem com um vhost HTTPS válido (wildcard `*.dialoguetech.com.br` ou certificado desse subdomínio).
+
+   ```bash
+   cd /root/Joao_gueireiro/V1
+   docker cp config/vps-isolated/nginx-host/joao-guerreiro-vhost-shared-443.conf guerreiros-frontend:/etc/nginx/conf.d/99-joao-guerreiro.conf
+   docker exec -it guerreiros-frontend sh -c "vi /etc/nginx/conf.d/99-joao-guerreiro.conf"
+   ```
+
+4. Testar e recarregar:
+
+   ```bash
+   docker exec guerreiros-frontend nginx -t && docker exec guerreiros-frontend nginx -s reload
+   ```
+
+5. O `proxy_pass` usa **`http://172.17.0.1:8081`** (gateway Docker → host). Se der *502* ou *connection refused*, a partir do contentor confirma o IP do host:
+
+   ```bash
+   docker exec guerreiros-frontend getent hosts host.docker.internal 2>/dev/null || true
+   ip -4 addr show docker0 | grep inet
+   ```
+
+   Substitui no ficheiro `172.17.0.1` pelo IP do `docker0` se for diferente, ou no `docker-compose` do Guerreiros adiciona `extra_hosts: - "host.docker.internal:host-gateway"` e usa `proxy_pass http://host.docker.internal:8081;`.
+
+6. **Cloudflare**: registo DNS **A** ou **CNAME** para o subdomínio apontando para esta VPS; SSL na origem **Full** ou **Full (strict)** conforme o certificado na VPS.
