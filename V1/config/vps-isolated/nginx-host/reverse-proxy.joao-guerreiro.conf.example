@@ -1,5 +1,5 @@
-# Nginx no HOST da VPS — SSL na 443 e proxy para o frontend Docker (8080).
-# O contentor joao_guerreiro-frontend expõe HTTP em 127.0.0.1:8080 (mapa 8080:80).
+# Nginx no HOST da VPS — SSL na 443 e proxy para o frontend Docker (8081).
+# O contentor joao_guerreiro-frontend expõe HTTP em 127.0.0.1:8081 (mapa 8081:80; stack isolada da Guerreiros).
 #
 # Hostname: atendimento-joaoguerreiro.dialoguetech.com.br
 # Certificado: deve incluir esse nome (SAN) — senão usa Let's Encrypt (certbot) para este FQDN.
@@ -30,7 +30,7 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:8081;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;

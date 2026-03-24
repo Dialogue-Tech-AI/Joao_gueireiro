@@ -13,17 +13,19 @@ Projeto Compose: `joao-guerreiro-vps` (nome do projeto; não altera os `containe
 
 ## Portas no host
 
-| Porta | Serviço |
-|--------|---------|
-| 5432 | Postgres |
-| 6379 | Redis |
-| 5672 / 15672 | RabbitMQ (AMQP / Management) |
-| 9000 / 9001 | MinIO API / Console |
-| 6333 / 6334 | Qdrant |
-| **8080** | Frontend HTTP |
-| **8443** | Frontend HTTPS (com certificados em `ssl/`) |
+Conjunto **dedicado** quando a mesma VPS já corre a stack Guerreiros (evita conflito `Bind ... already allocated`).
 
-Se outra stack já usar alguma destas portas, altera o mapeamento no compose.
+| Porta host | Serviço |
+|------------|---------|
+| 15432 | Postgres |
+| 16379 | Redis |
+| 5673 / 25672 | RabbitMQ (AMQP / Management) |
+| 19000 / 19001 | MinIO API / Console |
+| 16333 / 16334 | Qdrant |
+| **8081** | Frontend HTTP |
+| **8444** | Frontend HTTPS (com certificados em `ssl/`) |
+
+Dentro da rede Docker, os serviços continuam em `postgres:5432`, `minio:9000`, etc. (sem mudar).
 
 ## Passos na VPS
 

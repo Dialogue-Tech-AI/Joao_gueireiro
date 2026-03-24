@@ -1,14 +1,14 @@
 # Nginx no host (subdomínio → stack João Guerreiro)
 
-O `docker-compose.vps.yml` publica o frontend em **8080** (HTTP) e **8443** (HTTPS no contentor). A Cloudflare (proxy laranja) fala com a origem em **443** por defeito. Este Nginx na VPS:
+O `docker-compose.vps.yml` (stack isolada na mesma VPS que Guerreiros) publica o frontend em **8081** (HTTP) e **8444** (HTTPS no contentor). A Cloudflare (proxy laranja) fala com a origem em **443** por defeito. Este Nginx na VPS:
 
 - escuta **80** e **443** no host;
 - termina SSL;
-- envia tudo para **`http://127.0.0.1:8080`** (frontend Docker), que já faz proxy de `/api` e `/socket.io` para o backend.
+- envia tudo para **`http://127.0.0.1:8081`** (frontend Docker), que já faz proxy de `/api` e `/socket.io` para o backend.
 
 ## Pré-requisitos
 
-- Stack em execução: `docker compose ... up -d` (contentor `joao_guerreiro-frontend` a ouvir em **8080** no host).
+- Stack em execução: `docker compose ... up -d` (contentor `joao_guerreiro-frontend` a ouvir em **8081** no host).
 - Certificado **válido para o FQDN** do subdomínio (ex.: Let’s Encrypt ou o mesmo par `origin.pem` / `origin.key` se o cert cobrir esse nome).
 - **443 livre** no host. Se outro site já usa Nginx na 443, **não** instales um segundo Nginx: acrescenta apenas um novo `server { }` ao ficheiro existente.
 
@@ -56,4 +56,4 @@ O `docker-compose.vps.yml` publica o frontend em **8080** (HTTP) e **8443** (HTT
 
 ## Nota
 
-Se preferires não ter Nginx no host, alternativa é **DNS só** (nuvem cinzenta) e usar `https://subdomínio:8443`, ou regras da Cloudflare para origem na porta 8443 (conforme plano).
+Se preferires não ter Nginx no host, alternativa é **DNS só** (nuvem cinzenta) e usar `https://subdomínio:8444`, ou regras da Cloudflare para origem na porta 8444 (conforme plano).
