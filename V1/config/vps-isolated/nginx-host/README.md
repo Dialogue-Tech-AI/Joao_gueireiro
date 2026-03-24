@@ -1,59 +1,58 @@
 # Nginx no host (subdomínio → stack João Guerreiro)
 
-O `docker-compose.vps.yml` (stack isolada na mesma VPS que Guerreiros) publica o frontend em **8081** (HTTP) e **8444** (HTTPS no contentor). A Cloudflare (proxy laranja) fala com a origem em **443** por defeito. Este Nginx na VPS:
+O `docker-compose.vps.yml` publica o frontend em **8081** (HTTP) e **8444** (HTTPS no contentor). Com **Cloudflare** (proxy laranja), a origem costuma ser contactada em **443**. Este Nginx no **host**:
 
-- escuta **80** e **443** no host;
+- escuta **80** e **443**;
 - termina SSL;
-- envia tudo para **`http://127.0.0.1:8081`** (frontend Docker), que já faz proxy de `/api` e `/socket.io` para o backend.
+- envia tudo para **`http://127.0.0.1:8081`** (contentor `joao_guerreiro-frontend`), que já faz proxy de `/api` e `/socket.io`.
+
+Ficheiros:
+
+- **`joao-guerreiro.conf`** — configuração pronta (`server_name` = `atendimento-joaoguerreiro.dialoguetech.com.br`).
+- **`install-nginx-host.sh`** — instala o pacote `nginx`, copia certs e ativa o site.
 
 ## Pré-requisitos
 
-- Stack em execução: `docker compose ... up -d` (contentor `joao_guerreiro-frontend` a ouvir em **8081** no host).
-- Certificado **válido para o FQDN** do subdomínio (ex.: Let’s Encrypt ou o mesmo par `origin.pem` / `origin.key` se o cert cobrir esse nome).
-- **443 livre** no host. Se outro site já usa Nginx na 443, **não** instales um segundo Nginx: acrescenta apenas um novo `server { }` ao ficheiro existente.
+- Stack Docker em execução com o frontend à escuta em **8081** no host.
+- `origin.pem` e `origin.key` em `config/vps-isolated/ssl/` (válidos para o FQDN ou wildcard).
+- **443 livre** no host. Se já existe Nginx com outro site, não corras o script cegamente: incorpora os `server { }` de `joao-guerreiro.conf` no ficheiro principal.
 
-## Passos na VPS (Debian/Ubuntu)
+## Instalação rápida (VPS, como root)
 
-1. Instalar Nginx (se ainda não existir):
+Depois de `git pull` e com o compose de pé:
 
-   ```bash
-   sudo apt update && sudo apt install -y nginx
-   ```
+```bash
+chmod +x /root/Joao_gueireiro/V1/config/vps-isolated/nginx-host/install-nginx-host.sh
+bash /root/Joao_gueireiro/V1/config/vps-isolated/nginx-host/install-nginx-host.sh
+```
 
-2. Copiar certificados para um sítio legível pelo Nginx:
+Caminho alternativo do repo:
 
-   ```bash
-   sudo mkdir -p /etc/nginx/ssl/joao-guerreiro
-   sudo cp /root/Joao_gueireiro/V1/config/vps-isolated/ssl/origin.pem /etc/nginx/ssl/joao-guerreiro/
-   sudo cp /root/Joao_gueireiro/V1/config/vps-isolated/ssl/origin.key /etc/nginx/ssl/joao-guerreiro/
-   sudo chmod 640 /etc/nginx/ssl/joao-guerreiro/origin.key
-   sudo chown root:www-data /etc/nginx/ssl/joao-guerreiro/origin.key
-   ```
+```bash
+bash /caminho/Joao_gueireiro/V1/config/vps-isolated/nginx-host/install-nginx-host.sh /caminho/Joao_gueireiro/V1
+```
 
-   Se o certificado **não** incluir o subdomínio novo, emite um cert (ex. Certbot) para esse FQDN e aponta `ssl_certificate` / `ssl_certificate_key` para `fullchain.pem` e `privkey.pem`.
+## Manual (sem script)
 
-3. Criar o site a partir do exemplo:
+```bash
+sudo apt update && sudo apt install -y nginx
+sudo mkdir -p /etc/nginx/ssl/joao-guerreiro
+sudo cp /root/Joao_gueireiro/V1/config/vps-isolated/ssl/origin.pem /etc/nginx/ssl/joao-guerreiro/
+sudo cp /root/Joao_gueireiro/V1/config/vps-isolated/ssl/origin.key /etc/nginx/ssl/joao-guerreiro/
+sudo chmod 640 /etc/nginx/ssl/joao-guerreiro/origin.key
+sudo chown root:www-data /etc/nginx/ssl/joao-guerreiro/origin.key
+sudo cp /root/Joao_gueireiro/V1/config/vps-isolated/nginx-host/joao-guerreiro.conf /etc/nginx/sites-available/
+sudo ln -sf /etc/nginx/sites-available/joao-guerreiro.conf /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
 
-   ```bash
-   sudo nano /etc/nginx/sites-available/joao-guerreiro.conf
-   ```
+## Cloudflare e firewall
 
-   Cola o conteúdo de `reverse-proxy.joao-guerreiro.conf.example` (já com `server_name atendimento-joaoguerreiro.dialoguetech.com.br`).
-
-4. Ativar e testar:
-
-   ```bash
-   sudo ln -sf /etc/nginx/sites-available/joao-guerreiro.conf /etc/nginx/sites-enabled/
-   sudo nginx -t
-   sudo systemctl reload nginx
-   ```
-
-5. Cloudflare: modo SSL **Full** ou **Full (strict)**. Firewall da VPS: **80** e **443** TCP abertos para o mundo (a Cloudflare liga-se à origem).
+- SSL/TLS: **Full** ou **Full (strict)**.
+- Abrir **80** e **443** TCP na VPS (origem).
 
 ## Teste
 
-- `curl -I https://atendimento-joaoguerreiro.dialoguetech.com.br` deve devolver HTTP 200 ou 301 vindo do teu stack.
-
-## Nota
-
-Se preferires não ter Nginx no host, alternativa é **DNS só** (nuvem cinzenta) e usar `https://subdomínio:8444`, ou regras da Cloudflare para origem na porta 8444 (conforme plano).
+```bash
+curl -sI https://atendimento-joaoguerreiro.dialoguetech.com.br
+```
