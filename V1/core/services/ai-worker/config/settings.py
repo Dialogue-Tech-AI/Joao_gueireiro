@@ -22,7 +22,13 @@ if not os.path.exists(_env_file_path) and os.path.exists(_fallback_env):
 if not os.path.exists(_env_file_path):
     _env_file_path = _local_env
 
-load_dotenv(_env_file_path)
+# No Docker (Compose env_file), o path do monorepo não existe em /app — só usar variáveis injectadas.
+_in_docker = os.path.exists("/.dockerenv") or os.getenv("JOAO_VPS_DOCKER_NETWORK") == "1"
+_env_file_for_pydantic = (
+    _env_file_path if (not _in_docker and os.path.isfile(_env_file_path)) else None
+)
+if _env_file_for_pydantic:
+    load_dotenv(_env_file_for_pydantic)
 
 
 class Settings(BaseSettings):
@@ -72,9 +78,9 @@ class Settings(BaseSettings):
     log_level: str = os.getenv('LOG_LEVEL', 'INFO')
     
     class Config:
-        env_file = _env_file_path
+        env_file = _env_file_for_pydantic
         case_sensitive = False
-        extra = 'ignore'  # Ignorar campos extras do .env (que são do Node.js)
+        extra = "ignore"  # Ignorar campos extras do .env (que são do Node.js)
 
 
 # Global settings instance

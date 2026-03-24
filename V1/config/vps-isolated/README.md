@@ -48,3 +48,26 @@ docker compose -f config/vps-isolated/docker-compose.vps.yml --env-file config/v
 ```
 
 Repositório: [Dialogue-Tech-AI/Joao_gueireiro](https://github.com/Dialogue-Tech-AI/Joao_gueireiro)
+
+## IA (ai-worker) na VPS
+
+O worker Python lê **`credentials/ai-worker.vps.env`** (montado pelo Compose). Se a app sobe mas a **IA não responde**, confirma:
+
+| Variável | Obrigatório | Notas |
+|----------|-------------|--------|
+| `OPENAI_API_KEY` | Sim | Chave `sk-...` válida; sem isto o worker nem arranca (erro no log). |
+| `INTERNAL_API_KEY` | Sim | **Tem de ser igual** a `INTERNAL_API_KEY_DEV` em `credentials/backend.vps.env` (chamadas internas app ↔ worker). |
+| `RABBITMQ_URL` | Sim | `amqp://joao_guerreiro:SENHA@rabbitmq:5672/` — a **SENHA** é a mesma que `RABBITMQ_PASSWORD` / `RABBITMQ_PASS_DEV` no `.env` e no backend. |
+| `POSTGRES_URL` | Sim | `postgresql://joao_guerreiro:SENHA@postgres:5432/joao_guerreiro` — mesma senha que `POSTGRES_PASSWORD`. |
+| `NODE_API_URL` | Sim | Dentro do Compose: **`http://app:3000`** (nome do serviço `app`). |
+| `REDIS_HOST` / `QDRANT_HOST` | Sim | `redis` e `qdrant` (nomes dos serviços), não `localhost`. |
+| `USE_SQS` | Não | Manter **`false`** salvo uses filas AWS. |
+
+Comandos úteis:
+
+```bash
+docker logs joao_guerreiro-ai-worker --tail 120
+docker exec joao_guerreiro-rabbitmq rabbitmqctl list_queues name messages
+```
+
+Na UI (Super Admin), verifica se a **IA não está desativada** globalmente.
