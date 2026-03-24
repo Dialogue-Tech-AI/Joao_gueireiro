@@ -612,6 +612,47 @@ export class BaileysAdapter implements IWhatsAppAdapter {
           continue;
         }
 
+        // Baileys: baixar mídia e armazenar no MinIO (como a API oficial faz no webhook)
+        // Sem mediaUrl, a IA não consegue transcrever áudio nem descrever imagem
+        if (
+          messageContent.mediaType &&
+          (messageContent.mediaType === 'image' ||
+            messageContent.mediaType === 'audio' ||
+            messageContent.mediaType === 'video' ||
+            messageContent.mediaType === 'document') &&
+          !messageContent.mediaUrl &&
+          this.socket
+        ) {
+          try {
+            const stored = await mediaService.downloadAndStoreWhatsAppMedia(
+              this.socket,
+              msg as proto.IWebMessageInfo,
+              this.numberId,
+              msg.key?.id
+            );
+            if (stored) {
+              messageContent.mediaUrl = stored.mediaUrl;
+              messageContent.mediaType = stored.mediaType;
+              logger.info('Baileys: media downloaded and stored in MinIO', {
+                messageId: msg.key.id,
+                mediaType: stored.mediaType,
+                storagePath: stored.mediaUrl,
+              });
+            } else {
+              logger.warn('Baileys: media download failed', {
+                messageId: msg.key.id,
+                mediaType: messageContent.mediaType,
+              });
+            }
+          } catch (err: any) {
+            logger.error('Baileys: error downloading media', {
+              messageId: msg.key.id,
+              mediaType: messageContent.mediaType,
+              error: err?.message,
+            });
+          }
+        }
+
         logger.info('Message content extracted successfully', {
           numberId: this.numberId,
           messageId: msg.key.id,
