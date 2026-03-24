@@ -36,10 +36,21 @@ docker compose -f config/vps-isolated/docker-compose.vps.yml --env-file config/v
 
 Se o ficheiro já estiver **dentro** do clone do repo na VPS (`config/vps-isolated/dumps/joao_guerreiro_dev_dump.sql`), podes usar esse caminho no `docker cp` em vez de `/root/joao_guerreiro_dev_dump.sql`.
 
-## Restaurar (caminho só com ficheiro já no repo na VPS)
+## Restaurar (recomendado: script na VPS)
+
+Evita `source .env` (ficheiros **CRLF** do Windows causam `: command not found`).
 
 ```bash
-export PGPASSWORD='a_mesma_senha_do_postgres'
+cd /root/Joao_gueireiro/V1
+git pull
+chmod +x config/vps-isolated/dumps/restore-dump-on-vps.sh
+./config/vps-isolated/dumps/restore-dump-on-vps.sh
+```
+
+## Restaurar (manual, ficheiro já no repo na VPS)
+
+```bash
+export PGPASSWORD="$(grep '^POSTGRES_PASSWORD=' config/vps-isolated/.env | cut -d= -f2- | tr -d '\r' | sed 's/^"//;s/"$//')"
 cd ~/Joao_gueireiro/V1
 docker cp config/vps-isolated/dumps/joao_guerreiro_dev_dump.sql joao_guerreiro-postgres:/tmp/dump.sql
 docker exec -e PGPASSWORD="$PGPASSWORD" joao_guerreiro-postgres psql -U joao_guerreiro -d joao_guerreiro -v ON_ERROR_STOP=1 -f /tmp/dump.sql
