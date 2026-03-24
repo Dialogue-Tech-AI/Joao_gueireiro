@@ -72,6 +72,8 @@ temp/
 # AWS
 .aws/
 *.pem
+config/vps/ssl/origin.pem
+config/vps/ssl/origin.key
 
 # Cloudflare
 cloudflared.exe

@@ -4,9 +4,29 @@ Para usar Cloudflare em modo **Full** ou **Full (Strict)**, coloque aqui o **Clo
 
 **IMPORTANTE:** Sem `origin.pem` e `origin.key`, o nginx não ativa HTTPS. O domínio não funcionará com Cloudflare Full.
 
-## Como obter e instalar
+**NUNCA commite certificados no git** - use o script ou crie os arquivos manualmente na VPS.
 
-### 1. Criar certificado no Cloudflare
+## Opção A: Script interativo (recomendado)
+
+Na VPS, após `git pull`:
+```bash
+cd ~/Guerreiros/V1/config/vps/ssl
+chmod +x setup-ssl.sh
+./setup-ssl.sh
+```
+O script abre o editor para você colar o certificado e a chave do Cloudflare.
+
+## Opção B: Copiar de arquivos (ex: SCP)
+
+Se você já tem os arquivos em outro local na VPS:
+```bash
+cd ~/Guerreiros/V1/config/vps/ssl
+./setup-ssl.sh /caminho/para/certificado.pem /caminho/para/chave.key
+```
+
+## Opção C: Manual
+
+### 1. Criar certificado no Cloudflare (para Opção C)
 - Cloudflare Dashboard → seu domínio → **SSL/TLS** → **Origin Server**
 - Clique em **Create Certificate**
 - Deixe os valores padrão (RSA, 15 anos) e confirme
