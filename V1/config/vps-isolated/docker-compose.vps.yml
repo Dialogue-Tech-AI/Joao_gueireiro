@@ -1,53 +1,57 @@
 # ============================================================
-# João Guerreiro — stack VPS isolada (2ª instância na mesma máquina)
+# João Guerreiro — VPS (dependências alinhadas ao compose local)
 # ============================================================
-# Todos os nomes (projeto Compose, containers, volumes, rede) usam
-# prefixo joaog-v2 para não colidir com outra instância (ex.: guerreiros-*).
+# Nomes iguais ao config/local/dependencies/docker-compose.yml:
+#   joao_guerreiro-postgres, joao_guerreiro-network, volumes joao_guerreiro-*-data
+# + serviços app, ai-worker, frontend.
 #
-# Execute sempre a partir da pasta V1:
-#   cd /caminho/para/Joao_gueireiro/V1
-#   docker compose -f config/vps-isolated/docker-compose.joaog-v2.yml up -d --build
+# Isolamento na mesma VPS: estes nomes não colidem com outra app que use
+# prefixo diferente (ex.: guerreiros-*). Não corras dois stacks com os
+# mesmos container_name na mesma máquina (Docker exige nomes únicos).
 #
-# Portas no HOST (ajuste se já estiverem em uso):
-#   8080  → HTTP do frontend (Nginx)
-#   8443  → HTTPS do frontend
-#   19000 → MinIO API (opcional; pode omitir o mapeamento)
-#   19001 → MinIO Console
-#   25672 → RabbitMQ Management
+# Uso (a partir de V1):
+#   docker compose -f config/vps-isolated/docker-compose.vps.yml --env-file config/vps-isolated/.env up -d --build
+#
+# Portas no host: iguais às do compose local para Postgres/Redis/Rabbit/MinIO/Qdrant;
+# frontend: 8080 (HTTP) e 8443 (HTTPS) para não ocupar 80/443 se já estiverem em uso.
 # ============================================================
 
-name: joaog-v2
+name: joao-guerreiro-vps
 
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: joaog-v2-postgres
+    container_name: joao_guerreiro-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: joaog_v2
-      POSTGRES_PASSWORD: ${JOAOG_V2_POSTGRES_PASSWORD:-troque_esta_senha}
-      POSTGRES_DB: joaog_v2
+      POSTGRES_USER: joao_guerreiro
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-joao_guerreiro123}
+      POSTGRES_DB: joao_guerreiro
       PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
     volumes:
-      - joaog_v2_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
       - ../../core/shared/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U joaog_v2 -d joaog_v2"]
+      test: ["CMD-SHELL", "pg_isready -U joao_guerreiro -d joao_guerreiro"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: joaog-v2-redis
+    container_name: joao_guerreiro-redis
     restart: unless-stopped
     command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
     volumes:
-      - joaog_v2_redis_data:/data
+      - redis_data:/data
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -56,18 +60,19 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
-    container_name: joaog-v2-rabbitmq
+    container_name: joao_guerreiro-rabbitmq
     restart: unless-stopped
     environment:
-      RABBITMQ_DEFAULT_USER: joaog_v2
-      RABBITMQ_DEFAULT_PASS: ${JOAOG_V2_RABBITMQ_PASSWORD:-troque_esta_senha}
+      RABBITMQ_DEFAULT_USER: joao_guerreiro
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-joao_guerreiro123}
       RABBITMQ_DEFAULT_VHOST: /
     ports:
-      - "25672:15672"
+      - "5672:5672"
+      - "15672:15672"
     volumes:
-      - joaog_v2_rabbitmq_data:/var/lib/rabbitmq
+      - rabbitmq_data:/var/lib/rabbitmq
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 30s
@@ -76,19 +81,19 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: joaog-v2-minio
+    container_name: joao_guerreiro-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: joaog_v2
-      MINIO_ROOT_PASSWORD: ${JOAOG_V2_MINIO_PASSWORD:-troque_minio}
+      MINIO_ROOT_USER: joao_guerreiro
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-joao_guerreiro}
     ports:
-      - "19000:9000"
-      - "19001:9001"
+      - "9000:9000"
+      - "9001:9001"
     volumes:
-      - joaog_v2_minio_data:/data
+      - minio_data:/data
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
@@ -97,35 +102,43 @@ services:
 
   minio-init:
     image: minio/mc:latest
-    container_name: joaog-v2-minio-init
+    container_name: joao_guerreiro-minio-init
     restart: "no"
     environment:
-      MINIO_PASS: ${JOAOG_V2_MINIO_PASSWORD:-troque_minio}
+      MINIO_PASS: ${MINIO_ROOT_PASSWORD:-joao_guerreiro}
     depends_on:
       minio:
         condition: service_healthy
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     entrypoint: >
       /bin/sh -c "
+      echo 'Aguardando MinIO estar pronto...';
       sleep 15;
-      /usr/bin/mc alias set joaogv2 http://minio:9000 joaog_v2 $$MINIO_PASS || exit 1;
-      /usr/bin/mc mb --ignore-existing joaogv2/attachments || exit 1;
-      /usr/bin/mc mb --ignore-existing joaogv2/media || exit 1;
-      /usr/bin/mc mb --ignore-existing joaogv2/logs || exit 1;
-      /usr/bin/mc anonymous set download joaogv2/attachments || exit 1;
-      /usr/bin/mc anonymous set download joaogv2/media || exit 1;
+      echo 'Configurando MinIO client...';
+      /usr/bin/mc alias set joao_guerreiro http://minio:9000 joao_guerreiro $$MINIO_PASS || exit 1;
+      echo 'Criando buckets...';
+      /usr/bin/mc mb --ignore-existing joao_guerreiro/attachments || exit 1;
+      /usr/bin/mc mb --ignore-existing joao_guerreiro/media || exit 1;
+      /usr/bin/mc mb --ignore-existing joao_guerreiro/logs || exit 1;
+      echo 'Configurando permissões...';
+      /usr/bin/mc anonymous set download joao_guerreiro/attachments || exit 1;
+      /usr/bin/mc anonymous set download joao_guerreiro/media || exit 1;
+      echo 'Inicialização concluída com sucesso!';
       exit 0;
       "
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: joaog-v2-qdrant
+    container_name: joao_guerreiro-qdrant
     restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
     volumes:
-      - joaog_v2_qdrant_data:/qdrant/storage
+      - qdrant_data:/qdrant/storage
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f qdrant || exit 1"]
       interval: 30s
@@ -137,10 +150,10 @@ services:
     build:
       context: ../../core
       dockerfile: ../config/dockerfiles/db-init.Dockerfile
-    container_name: joaog-v2-db-init
+    container_name: joao_guerreiro-db-init
     restart: "no"
     env_file:
-      - ./credentials/backend.joaog-v2.env
+      - ./credentials/backend.vps.env
     environment:
       DB_HOST_DEV: postgres
       REDIS_HOST_DEV: redis
@@ -150,16 +163,16 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
 
   app:
     build:
       context: ../../core/services/backend
       dockerfile: ../../../config/dockerfiles/backend.Dockerfile
-    container_name: joaog-v2-app
+    container_name: joao_guerreiro-app
     restart: unless-stopped
     env_file:
-      - ./credentials/backend.joaog-v2.env
+      - ./credentials/backend.vps.env
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -170,7 +183,7 @@ services:
       rabbitmq:
         condition: service_healthy
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1))\" || exit 1"]
       interval: 30s
@@ -183,21 +196,21 @@ services:
     build:
       context: ../../core/services/ai-worker
       dockerfile: ../../../config/dockerfiles/ai-worker.Dockerfile
-    container_name: joaog-v2-ai-worker
+    container_name: joao_guerreiro-ai-worker
     restart: unless-stopped
     env_file:
-      - ./credentials/ai-worker.joaog-v2.env
+      - ./credentials/ai-worker.vps.env
     depends_on:
       app:
         condition: service_healthy
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
 
   frontend:
     build:
       context: ../../core/services/frontend
       dockerfile: ../../../config/dockerfiles/frontend.Dockerfile
-    container_name: joaog-v2-frontend
+    container_name: joao_guerreiro-frontend
     restart: unless-stopped
     ports:
       - "8080:80"
@@ -208,7 +221,7 @@ services:
       app:
         condition: service_healthy
     networks:
-      - joaog-v2-internal
+      - joao_guerreiro-network
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -217,18 +230,23 @@ services:
       start_period: 20s
 
 volumes:
-  joaog_v2_postgres_data:
-    name: joaog_v2_postgres_data
-  joaog_v2_redis_data:
-    name: joaog_v2_redis_data
-  joaog_v2_rabbitmq_data:
-    name: joaog_v2_rabbitmq_data
-  joaog_v2_minio_data:
-    name: joaog_v2_minio_data
-  joaog_v2_qdrant_data:
-    name: joaog_v2_qdrant_data
+  postgres_data:
+    name: joao_guerreiro-postgres-data
+    driver: local
+  redis_data:
+    name: joao_guerreiro-redis-data
+    driver: local
+  rabbitmq_data:
+    name: joao_guerreiro-rabbitmq-data
+    driver: local
+  minio_data:
+    name: joao_guerreiro-minio-data
+    driver: local
+  qdrant_data:
+    name: joao_guerreiro-qdrant-data
+    driver: local
 
 networks:
-  joaog-v2-internal:
-    name: joaog-v2-internal
+  joao_guerreiro-network:
+    name: joao_guerreiro-network
     driver: bridge
