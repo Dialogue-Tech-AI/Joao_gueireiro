@@ -3,6 +3,7 @@ import os
 from urllib.parse import urlparse, urlunparse
 
 from dotenv import load_dotenv
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -123,7 +124,30 @@ class Settings(BaseSettings):
     
     # Logging
     log_level: str = os.getenv('LOG_LEVEL', 'INFO')
-    
+
+    @model_validator(mode="after")
+    def _vps_docker_fix_hosts(self):
+        """Garante hosts corretos após o Pydantic ler o env (localhost no .env → serviços Docker)."""
+        if os.getenv("JOAO_VPS_DOCKER_NETWORK") != "1":
+            return self
+        updates = {}
+        ru = _swap_url_host_if_localhost(self.rabbitmq_url, "rabbitmq")
+        if ru != self.rabbitmq_url:
+            updates["rabbitmq_url"] = ru
+        pu = _swap_url_host_if_localhost(self.postgres_url, "postgres")
+        if pu != self.postgres_url:
+            updates["postgres_url"] = pu
+        if self.redis_host in ("localhost", "127.0.0.1", "::1"):
+            updates["redis_host"] = "redis"
+        if self.qdrant_host in ("localhost", "127.0.0.1", "::1"):
+            updates["qdrant_host"] = "qdrant"
+        nu = self.node_api_url or ""
+        if "localhost" in nu and "3000" in nu:
+            updates["node_api_url"] = nu.replace("localhost", "app").replace("127.0.0.1", "app")
+        if updates:
+            return self.model_copy(update=updates)
+        return self
+
     class Config:
         env_file = _env_file_for_pydantic
         case_sensitive = False
