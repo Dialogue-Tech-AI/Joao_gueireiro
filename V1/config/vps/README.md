@@ -45,4 +45,7 @@ Migrations e seed rodam automaticamente via o servico `db-init` antes do app sub
 
 1. Configure o DNS A record apontando para o IP da VPS
 2. Ative o proxy (nuvem laranja) para SSL automático
-3. **SSL/TLS**: use modo **Flexible** (Cloudflare→origem em HTTP, porta 80)
+3. **SSL/TLS**: para **Full** ou **Full (Strict)**, configure certificado de origem:
+   - Cloudflare Dashboard → SSL/TLS → Origin Server → Create Certificate
+   - Salve `origin.pem` e `origin.key` em `config/vps/ssl/`
+   - Reinicie o frontend: `docker compose -f docker-compose.vps.yml up -d frontend`
