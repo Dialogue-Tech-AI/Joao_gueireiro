@@ -60,12 +60,17 @@ export function applyEnvMode(env: NodeJS.ProcessEnv = process.env): void {
     if (isProduction) {
       if (pair.prod !== undefined) {
         selected = pair.prod;
+      } else if (pair.dev !== undefined) {
+        // VPS/Docker: um único ficheiro com só *_DEV (ex. backend.vps.env)
+        selected = pair.dev;
       } else if (current !== undefined) {
         selected = current;
       }
     } else {
       if (pair.dev !== undefined) {
         selected = pair.dev;
+      } else if (pair.prod !== undefined) {
+        selected = pair.prod;
       } else if (current !== undefined) {
         selected = current;
       }
@@ -104,12 +109,14 @@ export function loadEnv(fromPath?: string): void {
   if (!envFile && existsSync(localBackend)) envFile = localBackend;
   if (!envFile && existsSync(serverBackend)) envFile = serverBackend;
   if (!envFile && existsSync(cwdEnvPath)) envFile = cwdEnvPath;
-  if (!envFile) envFile = localBackend;
 
-  const result = dotenv.config({ path: envFile });
-  if (result.error) {
-    console.warn(`Não foi possível carregar o arquivo de ambiente em ${envFile}:`, result.error.message);
+  if (envFile) {
+    const result = dotenv.config({ path: envFile });
+    if (result.error) {
+      console.warn(`Não foi possível carregar o arquivo de ambiente em ${envFile}:`, result.error.message);
+    }
   }
+  // Docker: variáveis vêm do env_file do Compose (já em process.env); não há ficheiro no disco.
 
   applyEnvMode(process.env);
 }
