@@ -2792,7 +2792,7 @@ export const SuperAdminDashboard: React.FC = () => {
             <div className="w-10 h-10 bg-primary rounded flex items-center justify-center shrink-0" style={{ backgroundColor: '#F07000' }}>
               <span className="material-icons-outlined text-white">settings_suggest</span>
             </div>
-            {!sidebarCollapsed && <span className="text-xl font-bold tracking-tight truncate">Fabio Guerreiro</span>}
+            {!sidebarCollapsed && <span className="text-xl font-bold tracking-tight truncate">Joao Guerreiro</span>}
             {!sidebarCollapsed && (
               <button
                 type="button"

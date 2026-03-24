@@ -24,6 +24,8 @@ import { createAlocaGerentesProcessor } from '../application/services/aloca-gere
 import { createEnviaCasosGerentesProcessor } from '../application/services/envia-casos-gerentes.processor';
 import { createAlocaProteseCapilarProcessor } from '../application/services/aloca-protese-capilar.processor';
 import { createAlocaOutrosAssuntosProcessor } from '../application/services/aloca-outros-assuntos.processor';
+import { createInteresseAiSubdivisionProcessor } from '../application/services/interesse-ai-subdivision.processor';
+import { createAgendamentoAiSubdivisionProcessor } from '../application/services/agendamento-ai-subdivision.processor';
 import { FunctionCallConfigService } from '../application/services/function-call-config.service';
 import { ProcessExecutionService } from '../application/services/process-execution.service';
 import type { FunctionCallProcessorHandler } from '../domain/interfaces/function-call-processor.interface';
@@ -89,6 +91,26 @@ export class FunctionCallProcessorWorker {
       this.registerProcessor('aloca-protese-capilar', alocaProteseCapilarProcessor);
       this.registerProcessor('protesecapilar', alocaProteseCapilarProcessor);
       this.registerProcessor('protese-capilar', alocaProteseCapilarProcessor);
+
+      const interesseFlashDay = createInteresseAiSubdivisionProcessor('flash-day');
+      const interesseLocacao = createInteresseAiSubdivisionProcessor('locacao-estudio');
+      const interesseCaptacao = createInteresseAiSubdivisionProcessor('captacao-videos');
+      this.registerProcessor('interesse_flash_day', interesseFlashDay);
+      this.registerProcessor('interesse-flash-day', interesseFlashDay);
+      this.registerProcessor('interesse_locacao_estudio', interesseLocacao);
+      this.registerProcessor('interesse-locacao-estudio', interesseLocacao);
+      this.registerProcessor('interesse_captacao_videos', interesseCaptacao);
+      this.registerProcessor('interesse-captacao-videos', interesseCaptacao);
+
+      const agFlashDay = createAgendamentoAiSubdivisionProcessor('flash-day');
+      const agLocacao = createAgendamentoAiSubdivisionProcessor('locacao-estudio');
+      const agCaptacao = createAgendamentoAiSubdivisionProcessor('captacao-videos');
+      this.registerProcessor('agendamento_flash_day', agFlashDay);
+      this.registerProcessor('agendamento-flash-day', agFlashDay);
+      this.registerProcessor('agendamento_locacao_estudio', agLocacao);
+      this.registerProcessor('agendamento-locacao-estudio', agLocacao);
+      this.registerProcessor('agendamento_captacao_videos', agCaptacao);
+      this.registerProcessor('agendamento-captacao-videos', agCaptacao);
 
       await this.queueService.assertQueue(this.queueProcess);
       await this.queueService.assertQueue(this.queueResponse);

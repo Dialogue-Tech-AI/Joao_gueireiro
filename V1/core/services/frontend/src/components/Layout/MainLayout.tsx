@@ -33,7 +33,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
           <div className="flex justify-between items-center">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">
-                Fabio Guerreiro
+                Joao Guerreiro
               </h1>
               <p className="text-sm text-gray-600">Sistema de Atendimento</p>
             </div>
@@ -64,7 +64,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       <footer className="bg-white border-t mt-auto">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <p className="text-center text-sm text-gray-600">
-            © 2026 Fabio Guerreiro - Todos os direitos reservados
+            © 2026 Joao Guerreiro - Todos os direitos reservados
           </p>
         </div>
       </footer>

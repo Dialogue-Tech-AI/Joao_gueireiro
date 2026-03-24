@@ -11,6 +11,13 @@ export interface AttributionSource {
   vehicleBrand?: string;
 }
 
+/** Campos de ai_context expostos ao supervisor (subdivisões AI + interesse) */
+export interface SupervisorAiContextSlice {
+  ai_subdivision?: string;
+  interesseConversationSummary?: string;
+  interesseClientQuestions?: string | string[];
+}
+
 export interface Conversation {
   id: UUID;
   clientPhone: string;
@@ -23,14 +30,23 @@ export interface Conversation {
   vehicleBrand?: 'FORD' | 'GM' | 'VW' | 'FIAT' | 'IMPORTADOS';
   createdAt: string;
   updatedAt: string;
+  /** Resumo/perguntas (Flash day, locação, captação) vindos do backend */
+  aiContext?: SupervisorAiContextSlice;
   /** Dados coletados pela FC (ex.: Demanda telefone fixo, E-commerce) */
   interventionData?: Record<string, unknown>;
   /** Tipo de intervenção (ex.: demanda-telefone-fixo, encaminhados-ecommerce) */
   interventionType?: string;
   /** Em "Atribuídos": identificador do chat (ex.: Intervenção humana → Demanda telefone fixo) */
   attributionSource?: AttributionSource;
-  /** Em "Não atribuídos" > Todos: origem para badge (triagem | encaminhados-ecommerce | encaminhados-balcao) */
-  unassignedSource?: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao';
+  /** Em "Não atribuídos" > Todos: origem para badge (ai-nao-classificados | encaminhados-ecommerce | encaminhados-balcao | ai-flash-day | ai-locacao-estudio | ai-captacao-videos) */
+  unassignedSource?:
+    | 'triagem'
+    | 'ai-nao-classificados'
+    | 'encaminhados-ecommerce'
+    | 'encaminhados-balcao'
+    | 'ai-flash-day'
+    | 'ai-locacao-estudio'
+    | 'ai-captacao-videos';
   /** Subdivisão do vendedor (pedidos-orcamentos, perguntas-pos-orcamento, etc.) */
   sellerSubdivision?: string;
   /** Fase do follow-up (Aguardando 1º Follow up, Aguardando 2º Follow up, Aguardando) */
@@ -95,6 +111,9 @@ export interface SupervisorStatsResponse {
     totalAttendances: number;
     byBrand: Record<string, number>;
     byIntervention: Record<string, number>;
+    byAiSubdivision?: Record<string, number>;
+    /** Chamadas das FCs agendamento_* no período (flash-day, locacao-estudio, captacao-videos) */
+    byAgendamentoCalls?: Record<string, number>;
     unclassifiedCount: number;
   };
   filters: {

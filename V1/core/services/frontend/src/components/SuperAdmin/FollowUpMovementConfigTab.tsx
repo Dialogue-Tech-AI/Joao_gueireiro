@@ -80,11 +80,11 @@ export const FollowUpMovementConfigTab: React.FC<FollowUpMovementConfigTabProps>
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
-                      min="60"
+                      min="2"
                       max="43200"
                       value={config.moveToFechadosAfterSecondFollowUpMinutes ?? ''}
                       onChange={(e) => {
-                        const v = e.target.value === '' ? undefined : Math.min(43200, Math.max(60, parseInt(e.target.value, 10) || 60));
+                        const v = e.target.value === '' ? undefined : Math.min(43200, Math.max(2, parseInt(e.target.value, 10) || 2));
                         setConfig({ ...config, moveToFechadosAfterSecondFollowUpMinutes: v ?? 1440 });
                       }}
                       className="w-28 px-3 py-2 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-primary outline-none"
@@ -104,7 +104,8 @@ export const FollowUpMovementConfigTab: React.FC<FollowUpMovementConfigTabProps>
                   <ul className="text-xs text-amber-700 dark:text-amber-400 space-y-1.5">
                     <li>• <strong>Abertos → Aguardando 1º:</strong> Após X minutos sem resposta do cliente, o atendimento aparece na coluna Aguardando 1º Follow-up.</li>
                     <li>• <strong>Aguardando 1º → Aguardando 2º:</strong> Automaticamente quando o 1º follow-up é enviado.</li>
-                    <li>• <strong>Aguardando 2º → Fechados:</strong> Após Y minutos após o envio do 2º follow-up, o atendimento é movido para Fechados.</li>
+                    <li>• <strong>Aguardando 2º → Aguardando:</strong> No envio do 2º follow-up, o atendimento vai para a coluna Aguardando (estado operacional aguardando cliente).</li>
+                    <li>• <strong>Aguardando → Fechados:</strong> Após Y minutos desde o envio do 2º follow-up, fechamento automático (este Y).</li>
                     <li>• Os tempos de envio das mensagens são configurados separadamente em &quot;Mensagens de Follow-up&quot;.</li>
                   </ul>
                 </div>

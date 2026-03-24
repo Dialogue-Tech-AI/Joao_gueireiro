@@ -29,6 +29,10 @@ config/server/credentials/.env
 config/server/credentials/.env
 config/server/credentials/.env
 config/vps/credentials/
+config/vps-isolated/credentials/
+config/vps-isolated/.env
+config/vps-isolated/ssl/*.pem
+config/vps-isolated/ssl/*.key
 
 # IDEs
 .vscode/

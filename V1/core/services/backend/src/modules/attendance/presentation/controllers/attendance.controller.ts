@@ -3,6 +3,9 @@ import multer from 'multer';
 import { Not, In, LessThan } from 'typeorm';
 import { AppDataSource } from '../../../../shared/infrastructure/database/typeorm/config/database.config';
 import { Attendance } from '../../domain/entities/attendance.entity';
+import { clearAgendamentoTimerFields } from '../../domain/utils/agendamento-auto-close.util';
+import { canReceiveFollowUp } from '../../domain/utils/follow-up-eligibility.util';
+import { AiSchedulingEvent } from '../../domain/entities/ai-scheduling-event.entity';
 import { Message } from '../../../message/domain/entities/message.entity';
 import { MessageRead } from '../../../message/domain/entities/message-read.entity';
 import { Seller } from '../../../seller/domain/entities/seller.entity';
@@ -48,6 +51,9 @@ const subdivisionCountsCache = new Map<string, { expiresAt: number; counts: Reco
 export function invalidateSubdivisionCountsCache(): void {
   subdivisionCountsCache.clear();
 }
+
+/** SQL: só fluxo AI sem intervenção humana ou encaminhados podem entrar no follow-up. */
+const FOLLOW_UP_INTERVENTION_ELIGIBLE_SQL = `(a.intervention_type IS NULL OR a.intervention_type IN ('encaminhados-ecommerce', 'encaminhados-balcao'))`;
 
 export class AttendanceController {
   public router: Router;
@@ -801,7 +807,16 @@ export class AttendanceController {
       const isInFollowUpFlow = async (a: Attendance): Promise<boolean> => {
         const aiContext = (a.aiContext ?? {}) as Record<string, any>;
         if (aiContext.closedManually) return false;
-        if (a.interventionType === 'demanda-telefone-fixo') return false;
+        if (!canReceiveFollowUp(a.interventionType)) return false;
+
+        // Janela pós-FC agendamento_* (timer 30 min ainda ativo): permanece em Abertos, fora do funil follow-up
+        const agCloseRaw = aiContext.agendamentoAutoCloseAt as string | undefined;
+        if (agCloseRaw) {
+          const deadline = new Date(agCloseRaw).getTime();
+          if (Number.isFinite(deadline) && deadline > Date.now()) {
+            return false;
+          }
+        }
 
         const followUpState = (aiContext.followUpState ?? {}) as {
           firstSentAt?: string;
@@ -848,12 +863,33 @@ export class AttendanceController {
         attendances = allUnassigned.filter((a) => a.interventionType === 'encaminhados-ecommerce');
       } else if (filter === 'encaminhados-balcao') {
         attendances = allUnassigned.filter((a) => a.interventionType === 'encaminhados-balcao');
+      } else if (filter === 'ai-flash-day') {
+        attendances = allUnassigned.filter((a) => isAiOpenFlow(a) && (a.aiContext as Record<string, unknown>)?.ai_subdivision === 'flash-day');
+      } else if (filter === 'ai-locacao-estudio') {
+        attendances = allUnassigned.filter((a) => isAiOpenFlow(a) && (a.aiContext as Record<string, unknown>)?.ai_subdivision === 'locacao-estudio');
+      } else if (filter === 'ai-captacao-videos') {
+        attendances = allUnassigned.filter((a) => isAiOpenFlow(a) && (a.aiContext as Record<string, unknown>)?.ai_subdivision === 'captacao-videos');
+      } else if (filter === 'ai-nao-classificados') {
+        const isClassifiedAi = (sub: string | undefined) =>
+          sub === 'flash-day' || sub === 'locacao-estudio' || sub === 'captacao-videos';
+        attendances = allUnassigned.filter((a) => {
+          if (!isAiOpenFlow(a)) return false;
+          const sub = (a.aiContext as Record<string, unknown>)?.ai_subdivision as string | undefined;
+          return !isClassifiedAi(sub);
+        });
       } else {
         attendances = allUnassigned.filter((a) => isAiOpenFlow(a));
       }
 
       // Remover do "Abertos/AI" quem já entrou no fluxo de follow-up.
-      if (filter === 'todos' || filter === 'triagem') {
+      if (
+        filter === 'todos' ||
+        filter === 'triagem' ||
+        filter === 'ai-nao-classificados' ||
+        filter === 'ai-flash-day' ||
+        filter === 'ai-locacao-estudio' ||
+        filter === 'ai-captacao-videos'
+      ) {
         const filtered: Attendance[] = [];
         for (const attendance of attendances) {
           if (isAiOpenFlow(attendance) && await isInFollowUpFlow(attendance)) {
@@ -932,12 +968,25 @@ export class AttendanceController {
             }
           }
 
-          const unassignedSource: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' =
+          const aiSub = (attendance.aiContext as Record<string, unknown>)?.ai_subdivision as string | undefined;
+          const unassignedSource:
+            | 'ai-nao-classificados'
+            | 'encaminhados-ecommerce'
+            | 'encaminhados-balcao'
+            | 'ai-flash-day'
+            | 'ai-locacao-estudio'
+            | 'ai-captacao-videos' =
             attendance.interventionType === 'encaminhados-ecommerce'
               ? 'encaminhados-ecommerce'
               : attendance.interventionType === 'encaminhados-balcao'
                 ? 'encaminhados-balcao'
-                : 'triagem';
+                : aiSub === 'flash-day'
+                  ? 'ai-flash-day'
+                  : aiSub === 'locacao-estudio'
+                    ? 'ai-locacao-estudio'
+                    : aiSub === 'captacao-videos'
+                      ? 'ai-captacao-videos'
+                      : 'ai-nao-classificados';
 
           const item: Record<string, unknown> = {
             id: attendance.id,
@@ -956,9 +1005,28 @@ export class AttendanceController {
           if (filter === 'todos') {
             item.unassignedSource = unassignedSource;
           }
-          if (filter === 'encaminhados-ecommerce' || filter === 'encaminhados-balcao' || (filter === 'todos' && unassignedSource !== 'triagem')) {
+          if (
+            filter === 'encaminhados-ecommerce' ||
+            filter === 'encaminhados-balcao' ||
+            (filter === 'todos' && unassignedSource !== 'ai-nao-classificados')
+          ) {
             item.interventionData = attendance.interventionData ?? undefined;
             item.interventionType = attendance.interventionType ?? undefined;
+          }
+          if (
+            aiSub &&
+            ['flash-day', 'locacao-estudio', 'captacao-videos'].includes(aiSub) &&
+            (filter === 'todos' ||
+              filter === 'ai-nao-classificados' ||
+              filter === 'ai-flash-day' ||
+              filter === 'ai-locacao-estudio' ||
+              filter === 'ai-captacao-videos')
+          ) {
+            item.aiContext = {
+              ai_subdivision: aiSub,
+              interesseConversationSummary: aiContext.interesseConversationSummary,
+              interesseClientQuestions: aiContext.interesseClientQuestions,
+            };
           }
           return item;
         })
@@ -1117,10 +1185,13 @@ export class AttendanceController {
       const minSecondSentAt = new Date(
         Date.now() - movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000
       ).toISOString();
+      const now = new Date();
       const notInFollowUpCondition = `NOT (
         a.last_client_message_at IS NOT NULL
         AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true'
+        AND ${FOLLOW_UP_INTERVENTION_ELIGIBLE_SQL}
         AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN ('AI', 'SELLER') AND mr.sent_at >= a.last_client_message_at)
+        AND ((a.ai_context->>'agendamentoAutoCloseAt') IS NULL OR (a.ai_context->>'agendamentoAutoCloseAt')::timestamptz <= :now)
         AND (
           ((a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :moveOpenToFirstCutoff)
           OR ((a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL)
@@ -1131,7 +1202,7 @@ export class AttendanceController {
         .createQueryBuilder('a')
         .where('a.intervention_type = :type', { type })
         .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
-        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
+        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt, now })
         .orderBy('a.updated_at', 'DESC')
         .getMany();
       attendances = await filterBlacklistedAttendances(attendances);
@@ -1666,6 +1737,7 @@ export class AttendanceController {
       const minSecondSentAt = new Date(
         Date.now() - movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000
       ).toISOString();
+      const now = new Date();
 
       const isTriagem = (a: Attendance) =>
         a.interventionType !== 'demanda-telefone-fixo' &&
@@ -1681,12 +1753,13 @@ export class AttendanceController {
         a.operationalState === OperationalState.AGUARDANDO_CLIENTE ||
         a.operationalState == null;
 
-      /** Excluir do triagem quem já entrou no follow-up (ex.: após 1h inatividade) */
+      /** Excluir do triagem quem já entrou no follow-up (ex.: após 1h inatividade). Timer futuro pós-FC agendamento = ainda em Abertos. */
       const notInFollowUpCondition = `NOT (
         a.last_client_message_at IS NOT NULL
         AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true'
-        AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo')
+        AND ${FOLLOW_UP_INTERVENTION_ELIGIBLE_SQL}
         AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN ('AI', 'SELLER') AND mr.sent_at >= a.last_client_message_at)
+        AND ((a.ai_context->>'agendamentoAutoCloseAt') IS NULL OR (a.ai_context->>'agendamentoAutoCloseAt')::timestamptz <= :now)
         AND (
           ((a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :moveOpenToFirstCutoff)
           OR ((a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL)
@@ -1706,7 +1779,7 @@ export class AttendanceController {
           "(a.operational_state IN (:...aiStates) OR a.operational_state IS NULL)",
           { aiStates: [OperationalState.TRIAGEM, OperationalState.ABERTO, OperationalState.EM_ATENDIMENTO, OperationalState.AGUARDANDO_CLIENTE] }
         )
-        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
+        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt, now })
         .getCount();
       counts['triagem'] = triagemCount;
 
@@ -1716,10 +1789,46 @@ export class AttendanceController {
           isFinalized: false,
           operationalState: Not(In([OperationalState.FECHADO_OPERACIONAL, OperationalState.AGUARDANDO_PRIMEIRA_MSG])),
         },
-        select: ['id', 'interventionType', 'operationalState'],
+        select: ['id', 'interventionType', 'operationalState', 'aiContext'],
       });
       counts['encaminhados-ecommerce'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-ecommerce').length;
       counts['encaminhados-balcao'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-balcao').length;
+
+      // Subdivisões AI: mesma base que triagem + notInFollowUpCondition (in-memory não aplicava follow-up → contador errado)
+      const aiSubdivisionFollowUpParams = { moveOpenToFirstCutoff, minSecondSentAt, now };
+      const aiStatesForSubdiv = [
+        OperationalState.TRIAGEM,
+        OperationalState.ABERTO,
+        OperationalState.EM_ATENDIMENTO,
+        OperationalState.AGUARDANDO_CLIENTE,
+      ];
+      const baseAiSubdivisionQb = () =>
+        attendanceRepo
+          .createQueryBuilder('a')
+          .where('a.seller_id IS NULL')
+          .andWhere('a.is_finalized = :fin', { fin: false })
+          .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+          .andWhere(
+            "(a.intervention_type IS NULL OR a.intervention_type NOT IN ('demanda-telefone-fixo', 'encaminhados-ecommerce', 'encaminhados-balcao', 'protese-capilar', 'outros-assuntos'))"
+          )
+          .andWhere('(a.operational_state IN (:...aiStates) OR a.operational_state IS NULL)', { aiStates: aiStatesForSubdiv })
+          .andWhere(notInFollowUpCondition, aiSubdivisionFollowUpParams);
+
+      counts['ai-flash-day'] = await baseAiSubdivisionQb()
+        .andWhere(`(a.ai_context->>'ai_subdivision') = :subFlash`, { subFlash: 'flash-day' })
+        .getCount();
+      counts['ai-locacao-estudio'] = await baseAiSubdivisionQb()
+        .andWhere(`(a.ai_context->>'ai_subdivision') = :subLoc`, { subLoc: 'locacao-estudio' })
+        .getCount();
+      counts['ai-captacao-videos'] = await baseAiSubdivisionQb()
+        .andWhere(`(a.ai_context->>'ai_subdivision') = :subCap`, { subCap: 'captacao-videos' })
+        .getCount();
+      counts['ai-nao-classificados'] = await baseAiSubdivisionQb()
+        .andWhere(
+          `(a.ai_context->>'ai_subdivision' IS NULL OR (a.ai_context->>'ai_subdivision') NOT IN (:...subsNao))`,
+          { subsNao: ['flash-day', 'locacao-estudio', 'captacao-videos'] }
+        )
+        .getCount();
 
       const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
       const interventionRows = await attendanceRepo
@@ -1729,7 +1838,7 @@ export class AttendanceController {
         .where('a.is_finalized = :fin', { fin: false })
         .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
         .andWhere('a.intervention_type IN (:...types)', { types: interventionTypes as unknown as string[] })
-        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
+        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt, now })
         .groupBy('a.intervention_type')
         .getRawMany();
       const interventionMap = new Map<string, number>();
@@ -1789,7 +1898,7 @@ export class AttendanceController {
         )
         .andWhere(
           `(a.seller_id IS NOT NULL OR (${notInFollowUpCondition}))`,
-          { moveOpenToFirstCutoff, minSecondSentAt }
+          { moveOpenToFirstCutoff, minSecondSentAt, now }
         );
       counts['abertos'] = await openQb.getCount();
       
@@ -1856,7 +1965,7 @@ export class AttendanceController {
       // - inativo-24h: já recebeu 2º follow-up e ainda não atingiu tempo para Fechados
       const moveToFechadosMinutes = movementConfig.moveToFechadosAfterSecondFollowUpMinutes;
       const followUpBaseWhere =
-        "a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at)";
+        `a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND ${FOLLOW_UP_INTERVENTION_ELIGIBLE_SQL} AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at) AND ((a.ai_context->>'agendamentoAutoCloseAt') IS NULL OR (a.ai_context->>'agendamentoAutoCloseAt')::timestamptz <= :now)`;
       const followUpParams = {
         fin: false,
         followUpStates: [
@@ -1868,6 +1977,7 @@ export class AttendanceController {
         supervisorId,
         aiOrigin: MessageOrigin.AI,
         sellerOrigin: MessageOrigin.SELLER,
+        now,
       };
       counts['inativo-1h'] = await attendanceRepo
         .createQueryBuilder('a')
@@ -1952,9 +2062,10 @@ export class AttendanceController {
       const minSecondSentAt = new Date(
         Date.now() - movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000
       ).toISOString();
+      const nowFollowUp = new Date();
 
       const followUpBaseWhere =
-        "a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at)";
+        `a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND ${FOLLOW_UP_INTERVENTION_ELIGIBLE_SQL} AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at) AND ((a.ai_context->>'agendamentoAutoCloseAt') IS NULL OR (a.ai_context->>'agendamentoAutoCloseAt')::timestamptz <= :now)`;
       const params: Record<string, any> = {
         fin: false,
         followUpStates: [
@@ -1966,6 +2077,7 @@ export class AttendanceController {
         supervisorId,
         aiOrigin: MessageOrigin.AI,
         sellerOrigin: MessageOrigin.SELLER,
+        now: nowFollowUp,
       };
 
       let nodeWhere = '';
@@ -2230,6 +2342,57 @@ export class AttendanceController {
         })
         .getCount();
 
+      // AI subdivisões: flash-day, locacao-estudio, captacao-videos.
+      // Em FECHADO_OPERACIONAL usa a foto em previousStateBeforeClosing.aiSubdivision (inclui fechados em "não classificados" = null).
+      const aiSubdivisionKeys = ['flash-day', 'locacao-estudio', 'captacao-videos'] as const;
+      const effectiveAiSubdivisionExpr = `(
+        CASE
+          WHEN a.operational_state = 'FECHADO_OPERACIONAL'
+            AND (a.ai_context->'previousStateBeforeClosing') IS NOT NULL
+            AND (a.ai_context->'previousStateBeforeClosing')::jsonb ? 'aiSubdivision'
+          THEN NULLIF(BTRIM(a.ai_context->'previousStateBeforeClosing'->>'aiSubdivision'), '')
+          WHEN a.operational_state = 'FECHADO_OPERACIONAL'
+          THEN NULLIF(BTRIM(a.ai_context->>'ai_subdivision'), '')
+          ELSE NULLIF(BTRIM(a.ai_context->>'ai_subdivision'), '')
+        END
+      )`;
+      const byAiSubdivision: Record<string, number> = {};
+      for (const k of aiSubdivisionKeys) byAiSubdivision[k] = 0;
+      const byAiSubdivisionRows = await makeBaseQuery()
+        .andWhere('a.created_at BETWEEN :from AND :to', { from: fromDate, to: toDate })
+        .andWhere(`${effectiveAiSubdivisionExpr} IN (:...aiTypes)`, { aiTypes: [...aiSubdivisionKeys] })
+        .select(effectiveAiSubdivisionExpr, 'aiSubdivision')
+        .addSelect('COUNT(*)', 'count')
+        .groupBy(effectiveAiSubdivisionExpr)
+        .getRawMany<{ aiSubdivision: string | null; count: string }>();
+      for (const row of byAiSubdivisionRows) {
+        if (row.aiSubdivision && aiSubdivisionKeys.includes(row.aiSubdivision as typeof aiSubdivisionKeys[number])) {
+          byAiSubdivision[row.aiSubdivision] = parseInt(row.count, 10) || 0;
+        }
+      }
+
+      /** Chamadas das FCs agendamento_* no período (para % = atendimentos interesse / agendamentos). */
+      const byAgendamentoCalls: Record<string, number> = {};
+      for (const k of aiSubdivisionKeys) byAgendamentoCalls[k] = 0;
+      const agQb = AppDataSource.getRepository(AiSchedulingEvent)
+        .createQueryBuilder('e')
+        .innerJoin(Attendance, 'a', 'a.id = e.attendance_id')
+        .where('e.created_at BETWEEN :from AND :to', { from: fromDate, to: toDate })
+        .andWhere(visibilityWhere, visibilityParams);
+      if (brandFilter) {
+        agQb.andWhere('a.vehicle_brand = :brand', { brand: brandFilter });
+      }
+      const agRows = await agQb
+        .select('e.service_key', 'serviceKey')
+        .addSelect('COUNT(*)', 'count')
+        .groupBy('e.service_key')
+        .getRawMany<{ serviceKey: string; count: string }>();
+      for (const row of agRows) {
+        if (row.serviceKey && aiSubdivisionKeys.includes(row.serviceKey as typeof aiSubdivisionKeys[number])) {
+          byAgendamentoCalls[row.serviceKey] = parseInt(row.count, 10) || 0;
+        }
+      }
+
       res.json({
         success: true,
         stats: {
@@ -2238,6 +2401,8 @@ export class AttendanceController {
           totalAttendances,
           byBrand,
           byIntervention,
+          byAiSubdivision,
+          byAgendamentoCalls,
           unclassifiedCount,
         },
         filters: {
@@ -2469,6 +2634,11 @@ export class AttendanceController {
       const lastMessageTime = lastMessageTimeRaw instanceof Date ? lastMessageTimeRaw.toISOString() : lastMessageTimeRaw;
 
       const aiContext = (attendance.aiContext ?? {}) as Record<string, unknown>;
+      const aiContextForClient = {
+        ai_subdivision: aiContext.ai_subdivision,
+        interesseConversationSummary: aiContext.interesseConversationSummary,
+        interesseClientQuestions: aiContext.interesseClientQuestions,
+      };
       const clientNameFromContext =
         typeof aiContext.clientName === 'string' && aiContext.clientName.trim() ? aiContext.clientName.trim() : null;
       const clientNameFromPush = messages.find(m => m.origin === MessageOrigin.CLIENT)?.metadata?.pushName as string | undefined;
@@ -2485,6 +2655,7 @@ export class AttendanceController {
           handledBy: attendance.handledBy,
           interventionType: attendance.interventionType ?? undefined,
           interventionData: attendance.interventionData ?? undefined,
+          aiContext: aiContextForClient,
           ...(offset === 0 && { lastMessageTime, createdAt: attendance.createdAt instanceof Date ? attendance.createdAt.toISOString() : (attendance.createdAt as string | undefined) }),
         },
         pagination: {
@@ -2679,6 +2850,10 @@ export class AttendanceController {
           attendanceId: attendance.id,
           newAssumedAt: attendance.assumedAt,
         });
+      }
+
+      if (attendance.aiContext && (attendance.aiContext as Record<string, unknown>).agendamentoAutoCloseAt) {
+        attendance.aiContext = clearAgendamentoTimerFields(attendance.aiContext as Record<string, unknown>);
       }
       
       await attendanceRepo.save(attendance);
@@ -3762,8 +3937,11 @@ export class AttendanceController {
       }
 
       // Salvar estado anterior no aiContext antes de limpar (para poder restaurar depois, incluindo timer da IA)
+      const ctxBeforeClose = (attendance.aiContext ?? {}) as Record<string, unknown>;
       const previousState = {
         interventionType: attendance.interventionType,
+        /** Foto da subdivisão AI no fechamento (null = não classificados); usada nas estatísticas do supervisor */
+        aiSubdivision: (ctxBeforeClose.ai_subdivision as string | undefined) ?? null,
         sellerSubdivision: attendance.sellerSubdivision,
         operationalState: attendance.operationalState,
         handledBy: attendance.handledBy,

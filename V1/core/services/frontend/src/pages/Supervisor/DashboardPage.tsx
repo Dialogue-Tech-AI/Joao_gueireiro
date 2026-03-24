@@ -16,18 +16,14 @@ import { contactsService, type Contact, type WhatsAppNumberInfo } from '../../se
 
 type VehicleBrand = 'FORD' | 'GM' | 'VW' | 'FIAT' | 'IMPORTADOS';
 
-/** Categorias de serviço (substituem marcas de veículos) */
-type ServiceCategory = 'PROTESE_CAPILAR' | 'MANUTENCAO' | 'OUTROS_ASSUNTOS';
+/** Categorias de serviço (Intervenção humana - apenas Outros assuntos) */
+type ServiceCategory = 'OUTROS_ASSUNTOS';
 type FollowUpNode = 'follow-up' | 'inativo-1h' | 'inativo-12h' | 'inativo-24h';
 const SERVICE_CATEGORIES: { key: ServiceCategory; label: string; icon: string }[] = [
-  { key: 'PROTESE_CAPILAR', label: 'Prótese capilar', icon: 'spa' },
-  { key: 'MANUTENCAO', label: 'Manutenção', icon: 'build' },
   { key: 'OUTROS_ASSUNTOS', label: 'Outros assuntos', icon: 'topic' },
 ];
 /** Mapeamento categoria -> marcas (para compatibilidade com backend) */
 const CATEGORY_TO_BRANDS: Record<ServiceCategory, VehicleBrand[]> = {
-  PROTESE_CAPILAR: ['FORD'],
-  MANUTENCAO: ['GM'],
   OUTROS_ASSUNTOS: ['VW', 'FIAT', 'IMPORTADOS'],
 };
 const FOLLOW_UP_LABELS: Record<FollowUpNode, string> = {
@@ -36,28 +32,55 @@ const FOLLOW_UP_LABELS: Record<FollowUpNode, string> = {
   'inativo-12h': 'Aguardando 2º Follow up',
   'inativo-24h': 'Aguardando',
 };
+/** Subdivisões da AI (Abertos): primeiro "Não classificados", depois as classificadas */
+type AISubdivision =
+  | 'ai-nao-classificados'
+  | 'ai-flash-day'
+  | 'ai-locacao-estudio'
+  | 'ai-captacao-videos';
+const AI_SUBDIVISIONS: { key: AISubdivision; label: string; icon: string }[] = [
+  { key: 'ai-nao-classificados', label: 'Não classificados', icon: 'label_off' },
+  { key: 'ai-flash-day', label: 'Flash Day', icon: 'flash_on' },
+  { key: 'ai-locacao-estudio', label: 'Locação de estúdio', icon: 'videocam' },
+  { key: 'ai-captacao-videos', label: 'Captação de vídeos', icon: 'movie' },
+];
+
+/** Badge na lista: nome da subdivisão AI ou null (usa "AI" quando não há subdivisão) */
+function getAiSubdivisionBadgeLabel(
+  unassignedSource: string | undefined,
+  aiContextSubdivision?: string | undefined
+): string | null {
+  if (unassignedSource === 'triagem') return 'Não classificados';
+  const fromKey = unassignedSource ? AI_SUBDIVISIONS.find((s) => s.key === unassignedSource)?.label : null;
+  if (fromKey) return fromKey;
+  const map: Record<string, string> = {
+    'flash-day': 'Flash Day',
+    'locacao-estudio': 'Locação de estúdio',
+    'captacao-videos': 'Captação de vídeos',
+  };
+  if (aiContextSubdivision && map[aiContextSubdivision]) return map[aiContextSubdivision];
+  return null;
+}
 /** Mapeamento serviço -> interventionType (quando filtro Intervenção humana está ativo) */
 const SERVICE_TO_INTERVENTION: Record<ServiceCategory, string | string[]> = {
-  PROTESE_CAPILAR: 'protese-capilar',
-  MANUTENCAO: 'demanda-telefone-fixo',
   OUTROS_ASSUNTOS: ['outros-assuntos'],
 };
 /** Mapeamento interventionType -> serviço (para roteamento em tempo real) */
 const INTERVENTION_TO_SERVICE: Record<string, ServiceCategory> = {
-  'protese-capilar': 'PROTESE_CAPILAR',
-  'demanda-telefone-fixo': 'MANUTENCAO',
+  'protese-capilar': 'OUTROS_ASSUNTOS',
+  'demanda-telefone-fixo': 'OUTROS_ASSUNTOS',
   'outros-assuntos': 'OUTROS_ASSUNTOS',
 };
 /** interventionType -> label do serviço para badge no card */
 const INTERVENTION_TO_SERVICE_LABEL: Record<string, string> = {
-  'protese-capilar': 'Prótese capilar',
-  'demanda-telefone-fixo': 'Manutenção',
+  'protese-capilar': 'Outros assuntos',
+  'demanda-telefone-fixo': 'Outros assuntos',
   'outros-assuntos': 'Outros assuntos',
 };
 /** Rótulos do backend (interventionTypeLabel) -> nosso label */
 const BACKEND_LABEL_TO_SERVICE: Record<string, string> = {
-  'Protese capilar': 'Prótese capilar',
-  'Demanda telefone fixo': 'Manutenção',
+  'Protese capilar': 'Outros assuntos',
+  'Demanda telefone fixo': 'Outros assuntos',
   'Outros assuntos': 'Outros assuntos',
 };
 const isLegacyRelocationSystemMessage = (msg?: {
@@ -79,10 +102,7 @@ function getServiceLabelFromConv(conv: any, serviceHint?: ServiceCategory | null
   if (labelRaw && BACKEND_LABEL_TO_SERVICE[labelRaw]) return BACKEND_LABEL_TO_SERVICE[labelRaw];
   if (labelRaw) {
     const normalized = labelRaw.toLowerCase();
-    if (normalized.includes('protese') || normalized.includes('prótese')) return 'Prótese capilar';
-    if (normalized.includes('telefone fixo') || normalized.includes('manutenc')) return 'Manutenção';
-    if (normalized.includes('outros assuntos')) return 'Outros assuntos';
-    if (normalized.includes('outros assuntos')) return 'Outros assuntos';
+    if (normalized.includes('protese') || normalized.includes('prótese') || normalized.includes('telefone fixo') || normalized.includes('manutenc') || normalized.includes('outros assuntos')) return 'Outros assuntos';
   }
 
   const brand = conv?.vehicleBrand as VehicleBrand | undefined;
@@ -120,6 +140,9 @@ interface SupervisorStatsState {
   totalAttendances: number;
   byBrand: Record<string, number>;
   byIntervention: Record<string, number>;
+  byAiSubdivision?: Record<string, number>;
+  /** FCs agendamento_* no período */
+  byAgendamentoCalls?: Record<string, number>;
   unclassifiedCount: number;
 }
 
@@ -193,7 +216,16 @@ export const SupervisorDashboard: React.FC = () => {
   const [selectedAttendanceFilter, setSelectedAttendanceFilter] = useState<string>('abertos');
   /** true = view "Intervenção humana" (todas intervenções com badge por serviço); false = view de serviços (vendedores) */
   const [viewingIntervencaoHumana, setViewingIntervencaoHumana] = useState<boolean>(false);
-  const [selectedNaoAtribuidosFilter, setSelectedNaoAtribuidosFilter] = useState<'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao'>('todos');
+  const [selectedNaoAtribuidosFilter, setSelectedNaoAtribuidosFilter] = useState<
+    | 'todos'
+    | 'triagem'
+    | 'encaminhados-ecommerce'
+    | 'encaminhados-balcao'
+    | 'ai-nao-classificados'
+    | 'ai-flash-day'
+    | 'ai-locacao-estudio'
+    | 'ai-captacao-videos'
+  >('todos');
   const [selectedFechadosFilter, setSelectedFechadosFilter] = useState<boolean>(false);
   const [fechadosConversations, setFechadosConversations] = useState<Conversation[]>([]);
   const [isLoadingFechados, setIsLoadingFechados] = useState(false);
@@ -309,6 +341,7 @@ export const SupervisorDashboard: React.FC = () => {
     totalAttendances: 0,
     byBrand: {},
     byIntervention: {},
+    byAgendamentoCalls: {},
     unclassifiedCount: 0,
   });
   const [isLoadingSupervisorStats, setIsLoadingSupervisorStats] = useState(false);
@@ -690,23 +723,10 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const maintenanceBookings = useMemo(() => {
-    // Nova fonte oficial: interventionType. Mantém fallback por marca.
-    const fromIntervention = supervisorStats.byIntervention?.['demanda-telefone-fixo'] ?? 0;
-    if (fromIntervention > 0) return fromIntervention;
-    const brands = CATEGORY_TO_BRANDS.MANUTENCAO;
-    return brands.reduce((sum, b) => sum + (supervisorStats.byBrand?.[b] ?? 0), 0);
-  }, [supervisorStats.byIntervention, supervisorStats.byBrand]);
-
-  const prosthesisReferrals = useMemo(() => {
-    const fromIntervention = supervisorStats.byIntervention?.['protese-capilar'] ?? 0;
-    if (fromIntervention > 0) return fromIntervention;
-    const brands = CATEGORY_TO_BRANDS.PROTESE_CAPILAR;
-    return brands.reduce((sum, b) => sum + (supervisorStats.byBrand?.[b] ?? 0), 0);
-  }, [supervisorStats.byIntervention, supervisorStats.byBrand]);
-
   const otherSubjectAttendances = useMemo(() => {
-    const fromIntervention = supervisorStats.byIntervention?.['outros-assuntos'] ?? 0;
+    const fromIntervention = (supervisorStats.byIntervention?.['outros-assuntos'] ?? 0)
+      + (supervisorStats.byIntervention?.['demanda-telefone-fixo'] ?? 0)
+      + (supervisorStats.byIntervention?.['protese-capilar'] ?? 0);
     if (fromIntervention > 0) return fromIntervention;
     const brands = CATEGORY_TO_BRANDS.OUTROS_ASSUNTOS;
     return brands.reduce((sum, b) => sum + (supervisorStats.byBrand?.[b] ?? 0), 0);
@@ -717,34 +737,93 @@ export const SupervisorDashboard: React.FC = () => {
     return `${((value / total) * 100).toFixed(1)}%`;
   }, []);
 
-  const protesePercentValue = useMemo(() => {
-    if (!supervisorStats.filteredAttendances) return 0;
-    return (prosthesisReferrals / supervisorStats.filteredAttendances) * 100;
-  }, [prosthesisReferrals, supervisorStats.filteredAttendances]);
+  const aiFlashDayCount = supervisorStats.byAiSubdivision?.['flash-day'] ?? 0;
+  const aiLocacaoEstudioCount = supervisorStats.byAiSubdivision?.['locacao-estudio'] ?? 0;
+  const aiCaptacaoVideosCount = supervisorStats.byAiSubdivision?.['captacao-videos'] ?? 0;
 
-  const manutencaoPercentValue = useMemo(() => {
-    if (!supervisorStats.filteredAttendances) return 0;
-    return (maintenanceBookings / supervisorStats.filteredAttendances) * 100;
-  }, [maintenanceBookings, supervisorStats.filteredAttendances]);
+  /**
+   * Partição exclusiva do total filtrado: Flash + Locação + Captação + Intervenção + Não classificados (resto).
+   * Evita somar >100% (ex.: "não classificados" da API incluía quem já tinha subdivisão AI).
+   */
+  const pieClassificationPercents = useMemo(() => {
+    const T = supervisorStats.filteredAttendances ?? 0;
+    const F = aiFlashDayCount;
+    const L = aiLocacaoEstudioCount;
+    const C = aiCaptacaoVideosCount;
+    const I = otherSubjectAttendances;
+    if (!T) {
+      return { flash: 0, loc: 0, cap: 0, interv: 0, uncl: 0 };
+    }
+    const R = T - F - L - C - I;
+    if (R >= 0) {
+      const r = R;
+      return {
+        flash: (F / T) * 100,
+        loc: (L / T) * 100,
+        cap: (C / T) * 100,
+        interv: (I / T) * 100,
+        uncl: (r / T) * 100,
+      };
+    }
+    const sum = F + L + C + I;
+    if (sum <= 0) return { flash: 0, loc: 0, cap: 0, interv: 0, uncl: 0 };
+    return {
+      flash: (F / sum) * 100,
+      loc: (L / sum) * 100,
+      cap: (C / sum) * 100,
+      interv: (I / sum) * 100,
+      uncl: 0,
+    };
+  }, [
+    supervisorStats.filteredAttendances,
+    aiFlashDayCount,
+    aiLocacaoEstudioCount,
+    aiCaptacaoVideosCount,
+    otherSubjectAttendances,
+  ]);
 
-  const outrosPercentValue = useMemo(() => {
-    if (!supervisorStats.filteredAttendances) return 0;
-    return (otherSubjectAttendances / supervisorStats.filteredAttendances) * 100;
-  }, [otherSubjectAttendances, supervisorStats.filteredAttendances]);
+  /** Quantidade exclusiva "não classificados" = total − (AI + intervenção), alinhada ao gráfico. */
+  const remainderUnclassifiedCount = useMemo(() => {
+    const T = supervisorStats.filteredAttendances ?? 0;
+    if (!T) return 0;
+    const R = T - aiFlashDayCount - aiLocacaoEstudioCount - aiCaptacaoVideosCount - otherSubjectAttendances;
+    return Math.max(0, R);
+  }, [
+    supervisorStats.filteredAttendances,
+    aiFlashDayCount,
+    aiLocacaoEstudioCount,
+    aiCaptacaoVideosCount,
+    otherSubjectAttendances,
+  ]);
 
-  const unclassifiedCount = supervisorStats.unclassifiedCount ?? 0;
-
-  const unclassifiedPercentValue = useMemo(() => {
-    if (!supervisorStats.filteredAttendances) return 0;
-    return (unclassifiedCount / supervisorStats.filteredAttendances) * 100;
-  }, [unclassifiedCount, supervisorStats.filteredAttendances]);
+  /**
+   * Percentual de agendamentos (cards): atendimentos com interesse (FC interesse) no período
+   * dividido pelas chamadas da FC agendamento_* no mesmo período.
+   */
+  const aiFlashDaySchedulingPercent = useMemo(() => {
+    const ag = supervisorStats.byAgendamentoCalls?.['flash-day'] ?? 0;
+    if (!ag) return 0;
+    return (aiFlashDayCount / ag) * 100;
+  }, [aiFlashDayCount, supervisorStats.byAgendamentoCalls]);
+  const aiLocacaoEstudioSchedulingPercent = useMemo(() => {
+    const ag = supervisorStats.byAgendamentoCalls?.['locacao-estudio'] ?? 0;
+    if (!ag) return 0;
+    return (aiLocacaoEstudioCount / ag) * 100;
+  }, [aiLocacaoEstudioCount, supervisorStats.byAgendamentoCalls]);
+  const aiCaptacaoVideosSchedulingPercent = useMemo(() => {
+    const ag = supervisorStats.byAgendamentoCalls?.['captacao-videos'] ?? 0;
+    if (!ag) return 0;
+    return (aiCaptacaoVideosCount / ag) * 100;
+  }, [aiCaptacaoVideosCount, supervisorStats.byAgendamentoCalls]);
 
   const classificationChartBackground = useMemo(() => {
+    const p = pieClassificationPercents;
     const slices = [
-      { color: '#0ea5e9', value: Math.max(0, protesePercentValue) },
-      { color: '#f59e0b', value: Math.max(0, manutencaoPercentValue) },
-      { color: '#d946ef', value: Math.max(0, outrosPercentValue) },
-      { color: '#94a3b8', value: Math.max(0, unclassifiedPercentValue) },
+      { color: '#0ea5e9', value: Math.max(0, p.flash) },
+      { color: '#f59e0b', value: Math.max(0, p.loc) },
+      { color: '#10b981', value: Math.max(0, p.cap) },
+      { color: '#d946ef', value: Math.max(0, p.interv) },
+      { color: '#94a3b8', value: Math.max(0, p.uncl) },
     ];
     const total = slices.reduce((sum, slice) => sum + slice.value, 0);
     if (total <= 0) {
@@ -766,7 +845,7 @@ export const SupervisorDashboard: React.FC = () => {
     }
 
     return `conic-gradient(from 0deg, ${parts.join(', ')})`;
-  }, [protesePercentValue, manutencaoPercentValue, outrosPercentValue, unclassifiedPercentValue]);
+  }, [pieClassificationPercents]);
 
   const isSellerCurrentlyUnavailable = useCallback((seller: Seller) => {
     if (seller.isUnavailable === false) return false;
@@ -1061,7 +1140,7 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const handleSelectNaoAtribuidos = () => {
+  const handleSelectNaoAtribuidos = (filter: typeof selectedNaoAtribuidosFilter = 'todos') => {
     setSelectedConversation(null);
     setSelectedSeller(null);
     setSelectedSellerBrand(null);
@@ -1072,7 +1151,7 @@ export const SupervisorDashboard: React.FC = () => {
     setSelectedFechadosFilter(false);
     setSelectedFollowUpNode(null);
     setSelectedAttendanceFilter('nao-atribuidos');
-    setSelectedNaoAtribuidosFilter('todos');
+    setSelectedNaoAtribuidosFilter(filter);
     setMobileChatLayer('conversations');
   };
 
@@ -1138,6 +1217,7 @@ export const SupervisorDashboard: React.FC = () => {
     if (selectedServiceCategory === category) return;
     setViewingIntervencaoHumana(false);
     setSelectedFollowUpNode(null);
+    setSelectedFechadosFilter(false);
     setSelectedServiceCategory(category);
     setSelectedSeller(null);
     setSelectedSellerSubdivision(null);
@@ -1295,6 +1375,7 @@ export const SupervisorDashboard: React.FC = () => {
 
   const handleSelectSeller = async (sellerId: string, subdivision?: string, brand?: VehicleBrand, fromDemandasCard?: boolean) => {
     setViewingFromDemandasCard(fromDemandasCard ?? false);
+    setSelectedFechadosFilter(false);
     setSelectedSeller(sellerId);
     setSelectedSellerSubdivision(subdivision || null);
     setSelectedSellerBrand(brand ?? null);
@@ -1362,20 +1443,19 @@ export const SupervisorDashboard: React.FC = () => {
     if (toPrepend) pendingChamarConversationRef.current = null;
     setIsLoadingConversations(true);
     try {
-      const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
-      const [unassigned, attributed, demandaFixo, ...otherInterventions] = await Promise.all([
+      const interventionTypes = ['outros-assuntos', 'protese-capilar', 'demanda-telefone-fixo'] as const;
+      const [unassigned, attributed, ...interventionLists] = await Promise.all([
         attendanceService.getUnassignedAttendances('todos'),
         attendanceService.getAttributedAttendances(),
-        attendanceService.getInterventionDemandaTelefoneFixo(),
-        attendanceService.getInterventionByType('protese-capilar'),
         attendanceService.getInterventionByType('outros-assuntos'),
+        attendanceService.getInterventionByType('protese-capilar'),
+        attendanceService.getInterventionByType('demanda-telefone-fixo'),
       ]);
-      const interventionLists = [demandaFixo, ...otherInterventions];
       const interventionMerged = interventionLists.flatMap((list, i) =>
         list.map((c) => ({
           ...c,
           interventionType: (c as any).interventionType ?? interventionTypes[i],
-          attributionSource: { type: 'intervention' as const, label: INTERVENTION_TO_SERVICE_LABEL[interventionTypes[i]] ?? interventionTypes[i], interventionType: interventionTypes[i] },
+          attributionSource: { type: 'intervention' as const, label: 'Outros assuntos', interventionType: 'outros-assuntos' as const },
         }))
       );
       const seen = new Set<string>();
@@ -1403,7 +1483,17 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const fetchUnassignedConversations = async (filter: 'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' = 'todos') => {
+  const fetchUnassignedConversations = async (
+    filter:
+      | 'todos'
+      | 'triagem'
+      | 'encaminhados-ecommerce'
+      | 'encaminhados-balcao'
+      | 'ai-nao-classificados'
+      | 'ai-flash-day'
+      | 'ai-locacao-estudio'
+      | 'ai-captacao-videos' = 'todos'
+  ) => {
     setIsLoadingConversations(true);
     try {
       const fetchedConversations = await attendanceService.getUnassignedAttendances(filter);
@@ -1415,7 +1505,15 @@ export const SupervisorDashboard: React.FC = () => {
       ).map((c) => readIds.has(String(c.id)) ? { ...c, unread: 0 } : c);
       setConversations(toSet);
 
-      const NAO_ATRIB_KEYS = ['triagem', 'encaminhados-ecommerce', 'encaminhados-balcao'] as const;
+      const NAO_ATRIB_KEYS = [
+        'triagem',
+        'ai-nao-classificados',
+        'encaminhados-ecommerce',
+        'encaminhados-balcao',
+        'ai-flash-day',
+        'ai-locacao-estudio',
+        'ai-captacao-videos',
+      ] as const;
       const ref = pendingBySubdivisionAndAttendanceRef.current;
       for (const k of NAO_ATRIB_KEYS) delete ref[k];
       setUnreadBySubdivision((prev) => {
@@ -1426,11 +1524,13 @@ export const SupervisorDashboard: React.FC = () => {
       for (const c of toSet) {
         const n = (c as { unread?: number }).unread ?? 0;
         if (n <= 0) continue;
-        const subKey = (c as { unassignedSource?: string }).unassignedSource ?? (filter === 'todos' ? 'triagem' : filter);
+        const subKey =
+          (c as { unassignedSource?: string }).unassignedSource ??
+          (filter === 'todos' ? 'ai-nao-classificados' : filter);
         incrementSubdivision(subKey, n, String(c.id));
       }
 
-      if (filter === 'triagem') {
+      if (filter === 'triagem' || filter === 'ai-nao-classificados') {
         setUnassignedConversationsCache((prevCache) => {
           const updatedCache = toSet.map((backendConv) => {
             const cached = prevCache.find((c) => c.id === backendConv.id);
@@ -1444,7 +1544,7 @@ export const SupervisorDashboard: React.FC = () => {
       console.error('Error fetching unassigned conversations:', error);
       toast.error('Erro ao carregar conversas não atribuídas.');
       setConversations([]);
-      if (filter === 'triagem') {
+      if (filter === 'triagem' || filter === 'ai-nao-classificados') {
         setUnassignedConversationsCache([]);
       }
     } finally {
@@ -1520,7 +1620,7 @@ export const SupervisorDashboard: React.FC = () => {
       }
       setConversations(list);
       // Popular unreadBySubdivision a partir do backend (MessageRead persistido) para que reload mostre correto
-      const ATRIB_KEYS = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
+      const ATRIB_KEYS = ['outros-assuntos'] as const;
       const sellerSubs = ['pedidos-orcamentos', 'perguntas-pos-orcamento', 'confirmacao-pix', 'tirar-pedido', 'informacoes-entrega', 'encomendas', 'cliente-pediu-humano'];
       const ref = pendingBySubdivisionAndAttendanceRef.current;
       for (const k of ATRIB_KEYS) delete ref[k];
@@ -1587,12 +1687,6 @@ export const SupervisorDashboard: React.FC = () => {
       setSearchTerm('');
       setConversations([]);
       fetchUnassignedConversations(selectedNaoAtribuidosFilter);
-    } else if (selectedFechadosFilter) {
-      setSelectedSeller(null);
-      setSelectedSellerBrand(null);
-      setSelectedTodasDemandasSubdivision(null);
-      setSearchTerm('');
-      fetchFechadosConversations();
     } else if (selectedFollowUpNode) {
       setSelectedSeller(null);
       setSelectedSellerBrand(null);
@@ -1608,6 +1702,12 @@ export const SupervisorDashboard: React.FC = () => {
     } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && !selectedServiceCategory && viewingIntervencaoHumana) {
       setSearchTerm('');
       fetchAllInterventionConversations();
+    } else if (selectedFechadosFilter) {
+      setSelectedSeller(null);
+      setSelectedSellerBrand(null);
+      setSelectedTodasDemandasSubdivision(null);
+      setSearchTerm('');
+      fetchFechadosConversations();
     } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && !selectedServiceCategory) {
       setSearchTerm('');
       fetchAttributedConversations();
@@ -1812,10 +1912,14 @@ export const SupervisorDashboard: React.FC = () => {
   }, [supervisorSellers]);
 
   useEffect(() => {
-    const tri = unreadBySubdivision['triagem'] ?? 0;
+    const nao = unreadBySubdivision['ai-nao-classificados'] ?? 0;
+    const flash = unreadBySubdivision['ai-flash-day'] ?? 0;
+    const loc = unreadBySubdivision['ai-locacao-estudio'] ?? 0;
+    const cap = unreadBySubdivision['ai-captacao-videos'] ?? 0;
+    const triLegacy = unreadBySubdivision['triagem'] ?? 0;
     const eco = unreadBySubdivision['encaminhados-ecommerce'] ?? 0;
     const bal = unreadBySubdivision['encaminhados-balcao'] ?? 0;
-    setTotalUnreadUnassigned(tri + eco + bal);
+    setTotalUnreadUnassigned(nao + flash + loc + cap + triLegacy + eco + bal);
   }, [unreadBySubdivision]);
 
   /** Contagem de atendimentos abertos na subdivisão (para exibir em todas as subdivisões da sidebar). */
@@ -1906,7 +2010,14 @@ export const SupervisorDashboard: React.FC = () => {
         lastMessageTime: string;
         createdAt: string;
         updatedAt: string;
-        unassignedFilter?: 'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao';
+        unassignedFilter?:
+          | 'triagem'
+          | 'ai-nao-classificados'
+          | 'encaminhados-ecommerce'
+          | 'encaminhados-balcao'
+          | 'ai-flash-day'
+          | 'ai-locacao-estudio'
+          | 'ai-captacao-videos';
       }) => {
         console.log('New unassigned message received via Socket.IO', data);
 
@@ -1933,7 +2044,7 @@ export const SupervisorDashboard: React.FC = () => {
         }
 
         const isConversationOpen = selectedConversationRef.current === data.attendanceId;
-        const filter = (data as any).unassignedFilter ?? 'triagem';
+        const filter = (data as any).unassignedFilter ?? 'ai-nao-classificados';
         const currentSubFilter = selectedNaoAtribuidosFilterRef.current;
         const matchesFilter = currentSubFilter === 'todos' || filter === currentSubFilter;
         
@@ -1978,7 +2089,7 @@ export const SupervisorDashboard: React.FC = () => {
                     handledBy: 'AI',
                     createdAt: data.createdAt,
                     updatedAt: data.updatedAt,
-                    unassignedSource: filter as 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao',
+                    unassignedSource: filter as Conversation['unassignedSource'],
                   };
                   updatedConversations = [newConversation, ...prev];
                 } else {
@@ -1989,8 +2100,8 @@ export const SupervisorDashboard: React.FC = () => {
               return updatedConversations;
             });
           });
-        } else if (!isConversationOpen && filter === 'triagem') {
-          // Se não está vendo a lista e mensagem é de "triagem", atualizar cache
+        } else if (!isConversationOpen && (filter === 'triagem' || filter === 'ai-nao-classificados')) {
+          // Se não está vendo a lista e mensagem é de não classificados (triagem legado), atualizar cache
           startTransition(() => {
             setUnassignedConversationsCache((prev) => {
                 const exists = prev.some((conv) => conv.id === data.attendanceId);
@@ -2248,7 +2359,11 @@ export const SupervisorDashboard: React.FC = () => {
             setConversations((prev) =>
               prev.map((c) => (c.id === data.attendanceId ? { ...c, unread: 0 } : c))
             );
-            if (selectedAttendanceFilterRef.current === 'nao-atribuidos' && selectedNaoAtribuidosFilterRef.current === 'triagem') {
+            if (
+              selectedAttendanceFilterRef.current === 'nao-atribuidos' &&
+              (selectedNaoAtribuidosFilterRef.current === 'triagem' ||
+                selectedNaoAtribuidosFilterRef.current === 'ai-nao-classificados')
+            ) {
               setUnassignedConversationsCache((prevCache) =>
                 prevCache.map((c) => (c.id === data.attendanceId ? { ...c, unread: 0 } : c))
               );
@@ -2463,7 +2578,10 @@ export const SupervisorDashboard: React.FC = () => {
                   : conv
               );
             });
-            if (selectedNaoAtribuidosFilterRef.current === 'triagem') {
+            if (
+              selectedNaoAtribuidosFilterRef.current === 'triagem' ||
+              selectedNaoAtribuidosFilterRef.current === 'ai-nao-classificados'
+            ) {
               setUnassignedConversationsCache((prev) =>
                 prev.map((c) =>
                   c.id === data.attendanceId
@@ -2695,7 +2813,10 @@ export const SupervisorDashboard: React.FC = () => {
                   : conv
               )
             );
-            if (selectedNaoAtribuidosFilterRef.current === 'triagem') {
+            if (
+              selectedNaoAtribuidosFilterRef.current === 'triagem' ||
+              selectedNaoAtribuidosFilterRef.current === 'ai-nao-classificados'
+            ) {
               setUnassignedConversationsCache((prevCache) =>
                 prevCache.map((conv) =>
                   conv.id === data.attendanceId
@@ -2942,6 +3063,7 @@ export const SupervisorDashboard: React.FC = () => {
         attendanceId?: string;
         interventionType?: string;
         interventionData?: Record<string, unknown>;
+        aiDisabledUntil?: string;
       }) => {
         try {
           if (!data || !data.attendanceId) return;
@@ -2971,6 +3093,14 @@ export const SupervisorDashboard: React.FC = () => {
                 interventionData: (data.interventionData && Object.keys(data.interventionData).length > 0)
                   ? data.interventionData
                   : (prev.interventionData ?? {}),
+                ...(isOutrosAssuntos
+                  ? {
+                      aiContext: {
+                        ...(prev.aiContext ?? {}),
+                        ai_subdivision: undefined,
+                      },
+                    }
+                  : {}),
               };
             });
           };
@@ -3006,9 +3136,14 @@ export const SupervisorDashboard: React.FC = () => {
                 setSelectedAttendanceFilter('tudo');
                 setSelectedServiceCategory(null);
                 setViewingIntervencaoHumana(true);
+                setCustomerSidebarOpen(true);
                 updateCardData();
               });
               fetchAllInterventionConversations();
+              scheduleStatsRealtimeRefresh();
+              void attendanceService.getAIStatus(aid).then((s) => {
+                setAiStatus((prev) => ({ ...prev, [aid]: { disabled: s.aiDisabled } }));
+              }).catch(() => {});
               return;
             }
             if (!isViewing) {
@@ -3032,6 +3167,10 @@ export const SupervisorDashboard: React.FC = () => {
               console.error('relocation-seen error', e);
               processedRelocationsRef.current.delete(relKey);
             }
+            scheduleStatsRealtimeRefresh();
+            void attendanceService.getAIStatus(aid).then((s) => {
+              setAiStatus((prev) => ({ ...prev, [aid]: { disabled: s.aiDisabled } }));
+            }).catch(() => {});
             return;
           }
 
@@ -3070,6 +3209,47 @@ export const SupervisorDashboard: React.FC = () => {
       };
 
       socketService.on('attendance:moved-to-intervention', handleMovedToIntervention);
+
+      const handleAiSubdivisionUpdated = (data: {
+        attendanceId?: string;
+        unassignedSource?: string;
+        aiContext?: {
+          ai_subdivision?: string;
+          interesseConversationSummary?: string;
+          interesseClientQuestions?: string | string[];
+        };
+      }) => {
+        try {
+          if (!data?.attendanceId) return;
+          const aid = String(data.attendanceId);
+          setSelectedConversationData((prev) => {
+            if (!prev || String(prev.id) !== aid) return prev;
+            return {
+              ...prev,
+              ...(data.unassignedSource
+                ? { unassignedSource: data.unassignedSource as Conversation['unassignedSource'] }
+                : {}),
+              aiContext: {
+                ...(prev.aiContext ?? {}),
+                ...(data.aiContext ?? {}),
+              },
+            };
+          });
+          const patch = {
+            ...(data.unassignedSource ? { unassignedSource: data.unassignedSource as Conversation['unassignedSource'] } : {}),
+            ...(data.aiContext ? { aiContext: data.aiContext } : {}),
+          };
+          setConversations((prev) =>
+            prev.map((c) => (String(c.id) === aid ? { ...c, ...patch } : c))
+          );
+          setUnassignedConversationsCache((prev) =>
+            prev.map((c) => (String(c.id) === aid ? { ...c, ...patch } : c))
+          );
+        } catch (e) {
+          console.error('handleAiSubdivisionUpdated error', e);
+        }
+      };
+      socketService.on('attendance:ai-subdivision-updated', handleAiSubdivisionUpdated);
 
       // Listen for attendance control events
       const handleAttendanceAssumed = (data: { attendanceId: string; handledBy: 'HUMAN'; assumedBy: string; assumedAt: string }) => {
@@ -3385,6 +3565,7 @@ export const SupervisorDashboard: React.FC = () => {
         socketService.off('attendance:routed', handleAttendanceRouted);
         socketService.off('client:typing', handleClientTyping);
         socketService.off('attendance:moved-to-intervention', handleMovedToIntervention);
+        socketService.off('attendance:ai-subdivision-updated', handleAiSubdivisionUpdated);
         socketService.off('attendance_assumed', handleAttendanceAssumed);
         socketService.off('attendance_returned_to_ai', handleAttendanceReturnedToAI);
         socketService.off('attendance:moved-to-fechados', handleMovedToFechados);
@@ -3789,6 +3970,7 @@ export const SupervisorDashboard: React.FC = () => {
               ...(response.attendance!.clientName != null && { clientName: response.attendance!.clientName }),
               ...(response.attendance!.interventionData != null && { interventionData: response.attendance!.interventionData }),
               ...(response.attendance!.interventionType != null && { interventionType: response.attendance!.interventionType }),
+              ...(response.attendance!.aiContext != null && { aiContext: response.attendance!.aiContext }),
               ...(response.attendance!.state != null && { state: response.attendance!.state }),
               ...(response.attendance!.handledBy != null && { handledBy: response.attendance!.handledBy }),
               ...(response.attendance!.lastMessageTime != null && { lastMessageTime: response.attendance!.lastMessageTime }),
@@ -4374,7 +4556,13 @@ export const SupervisorDashboard: React.FC = () => {
     !selectedFechadosFilter;
   const isAiNodeActive =
     selectedAttendanceFilter === 'nao-atribuidos' &&
-    selectedNaoAtribuidosFilter === 'todos' &&
+    (selectedNaoAtribuidosFilter === 'todos' ||
+      [
+        'ai-nao-classificados',
+        'ai-flash-day',
+        'ai-locacao-estudio',
+        'ai-captacao-videos',
+      ].includes(selectedNaoAtribuidosFilter)) &&
     !selectedFechadosFilter;
   const isInterventionNodeActive = (viewingIntervencaoHumana || !!selectedServiceCategory) && !selectedFechadosFilter;
   const isFirstBranchActive = isAiNodeActive || isInterventionNodeActive;
@@ -4424,7 +4612,7 @@ export const SupervisorDashboard: React.FC = () => {
                 >
                   <span className="material-icons-round text-white">bolt</span>
                 </div>
-                <span className="text-lg font-bold tracking-tight">Fabio Guerreiro</span>
+                <span className="text-lg font-bold tracking-tight">Joao Guerreiro</span>
               </div>
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -4615,35 +4803,68 @@ export const SupervisorDashboard: React.FC = () => {
                 )}
               </div>
             </button>
-            <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${firstBranchLineClass}`}>
-              <button
-                type="button"
-                data-division-active={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? true : undefined}
-                onClick={handleSelectNaoAtribuidos}
-                className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
-                  selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos'
-                    ? 'text-slate-900 dark:text-white font-medium'
-                    : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
-                }`}
-                style={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? selectedNavTextStyle : {}}
-              >
-                <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                  <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isAiNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>├─</span>
-                  <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">smart_toy</span>
-                  <div className="flex flex-col items-start min-w-0">
-                    <span className="truncate">AI</span>
-                    <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('todos')} Atendimentos</span>
+                <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${firstBranchLineClass}`}>
+              {/* Seção AI - mesmo padrão de Intervenção Humana (parent + children com linhas de árvore) */}
+              <div className="space-y-0.5">
+                <button
+                  type="button"
+                  data-division-active={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? true : undefined}
+                  onClick={() => handleSelectNaoAtribuidos('todos')}
+                  className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
+                    selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos'
+                      ? 'text-navy dark:text-white font-medium'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                  style={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? selectedNavTextStyle : {}}
+                >
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                    <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isAiNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>├─</span>
+                    <span className="material-icons-round text-lg flex-shrink-0 text-slate-600 dark:text-slate-400">smart_toy</span>
+                    <div className="flex flex-col items-start min-w-0">
+                      <span className="truncate">AI</span>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('todos')} Atendimentos</span>
+                    </div>
                   </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {getRedBadgeDivision('nao-atribuidos') > 0 && (
+                      <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
+                    )}
+                    {totalUnreadUnassigned > 0 && (
+                      <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>{totalUnreadUnassigned > 99 ? '99+' : totalUnreadUnassigned}</span>
+                    )}
+                  </div>
+                </button>
+
+                {/* Subdivisões AI: Flash Day, Locação de estúdio, Captação de vídeos */}
+                <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${isAiNodeActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
+                {AI_SUBDIVISIONS.map(({ key, label, icon }, idx) => {
+                  const isSelected = selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === key;
+                  const branch = idx < AI_SUBDIVISIONS.length - 1 ? '├─' : '└─';
+                  const aiBranchClass = isSelected ? 'text-sky-600 dark:text-sky-400' : 'text-slate-300 dark:text-slate-600';
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      data-division-active={isSelected ? true : undefined}
+                      onClick={() => handleSelectNaoAtribuidos(key)}
+                      className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
+                        isSelected ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                      }`}
+                      style={isSelected ? selectedNavTextStyle : {}}
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                        <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${aiBranchClass}`}>{branch}</span>
+                        <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">{icon}</span>
+                        <div className="flex flex-col items-start min-w-0">
+                          <span className="truncate">{label}</span>
+                          <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount(key) ?? 0} Atendimentos</span>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
                 </div>
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  {getRedBadgeDivision('nao-atribuidos') > 0 && (
-                    <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
-                  )}
-                  {totalUnreadUnassigned > 0 && (
-                    <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>{totalUnreadUnassigned > 99 ? '99+' : totalUnreadUnassigned}</span>
-                  )}
-                </div>
-              </button>
+              </div>
 
               {/* Intervenção humana - view que mostra todas as intervenções com badge do serviço em cada card */}
               <div className="space-y-0.5">
@@ -5318,7 +5539,11 @@ export const SupervisorDashboard: React.FC = () => {
                             badgeLabel = 'Balcão';
                             badgeColor = 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-200';
                           } else {
-                            badgeLabel = 'AI';
+                            const aiSubLabel = getAiSubdivisionBadgeLabel(
+                              unassignedSource,
+                              (conv as { aiContext?: { ai_subdivision?: string } }).aiContext?.ai_subdivision
+                            );
+                            badgeLabel = aiSubLabel ?? 'AI';
                             badgeColor = 'bg-violet-100 dark:bg-violet-900/40 text-violet-800 dark:text-violet-200';
                           }
                           return (
@@ -5374,7 +5599,12 @@ export const SupervisorDashboard: React.FC = () => {
                         const inferredServiceLabel = getServiceLabelFromConv(conv, selectedServiceCategory);
                         const badgeLabel = inferredServiceLabel
                           ?? attrLabel
-                          ?? (selectedAttendanceFilter === 'nao-atribuidos' && unassignedSrc ? 'AI' : null);
+                          ?? (selectedAttendanceFilter === 'nao-atribuidos' && unassignedSrc
+                            ? getAiSubdivisionBadgeLabel(
+                                unassignedSrc,
+                                (conv as { aiContext?: { ai_subdivision?: string } }).aiContext?.ai_subdivision
+                              ) ?? 'AI'
+                            : null);
                         if (!badgeLabel) return null;
                         return (
                           <span className="inline-block mt-0.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 truncate max-w-[140px]" title={badgeLabel}>
@@ -5863,23 +6093,23 @@ export const SupervisorDashboard: React.FC = () => {
                     {!isLoadingSupervisorStats && (
                       <div className="grid grid-cols-2 sm:flex sm:flex-nowrap items-stretch gap-2 sm:gap-3 w-full xl:min-w-[640px] sm:justify-end">
                         <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px] sm:mr-6 xl:mr-8">
-                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos totais</p>
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400">Atendimentos totais</p>
                           <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.totalAttendances ?? 0}</p>
                         </div>
                         <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px]">
-                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos hoje</p>
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400">Atendimentos hoje</p>
                           <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.dayAttendances ?? 0}</p>
                         </div>
                         <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px]">
-                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos na semana</p>
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400">Atendimentos na semana</p>
                           <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{isLoadingWeekAttendances ? '...' : weekAttendances}</p>
                         </div>
                         <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px]">
-                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos no mês</p>
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400">Atendimentos no mês</p>
                           <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{isLoadingMonthAttendances ? '...' : monthAttendances}</p>
                         </div>
                         <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px] sm:ml-6 xl:ml-8 col-span-2 sm:col-span-1">
-                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos fechados</p>
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400">Atendimentos fechados</p>
                           <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{activeCountBySubdivision['fechados'] ?? 0}</p>
                         </div>
                       </div>
@@ -5896,43 +6126,57 @@ export const SupervisorDashboard: React.FC = () => {
                     <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3 xl:gap-4 items-stretch">
                       <div className="space-y-3">
                         <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
-                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Atendimentos sobre prótese capilar</h3>
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Flash Day</h3>
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             <div className="rounded-xl border border-sky-200/70 dark:border-sky-900/60 bg-sky-50/60 dark:bg-sky-900/20 p-3">
-                              <p className="text-xs text-sky-800 dark:text-sky-300">Quantidade de atendimentos sobre próteses capilares encaminhados</p>
-                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{prosthesisReferrals}</p>
+                              <p className="text-xs text-sky-800 dark:text-sky-300">Quantidade de atendimentos Flash Day</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{aiFlashDayCount}</p>
                             </div>
                             <div className="rounded-xl border border-sky-200/70 dark:border-sky-900/60 bg-sky-50/40 dark:bg-sky-900/15 p-3">
-                              <p className="text-xs text-sky-800 dark:text-sky-300">Percentual de atendimentos sobre próteses capilares</p>
-                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{protesePercentValue.toFixed(1)}%</p>
+                              <p className="text-xs text-sky-800 dark:text-sky-300">Percentual de agendamentos Flash Day</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{aiFlashDaySchedulingPercent.toFixed(1)}%</p>
                             </div>
                           </div>
                         </div>
 
                         <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
-                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Atendimentos sobre manutenção</h3>
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Locação de estúdio</h3>
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             <div className="rounded-xl border border-amber-200/70 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-900/20 p-3">
-                              <p className="text-xs text-amber-800 dark:text-amber-300">Quantidade de links de agendamento enviados</p>
-                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{maintenanceBookings}</p>
+                              <p className="text-xs text-amber-800 dark:text-amber-300">Quantidade de atendimentos Locação de estúdio</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{aiLocacaoEstudioCount}</p>
                             </div>
                             <div className="rounded-xl border border-amber-200/70 dark:border-amber-900/60 bg-amber-50/40 dark:bg-amber-900/15 p-3">
-                              <p className="text-xs text-amber-800 dark:text-amber-300">Percentual de atendimentos que tiveram links de agendamento enviados</p>
-                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{manutencaoPercentValue.toFixed(1)}%</p>
+                              <p className="text-xs text-amber-800 dark:text-amber-300">Percentual de agendamentos Locação de estúdio</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{aiLocacaoEstudioSchedulingPercent.toFixed(1)}%</p>
                             </div>
                           </div>
                         </div>
 
                         <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
-                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Atendimentos sobre outras coisas</h3>
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Captação de vídeos</h3>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div className="rounded-xl border border-emerald-200/70 dark:border-emerald-900/60 bg-emerald-50/60 dark:bg-emerald-900/20 p-3">
+                              <p className="text-xs text-emerald-800 dark:text-emerald-300">Quantidade de atendimentos Captação de vídeos</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{aiCaptacaoVideosCount}</p>
+                            </div>
+                            <div className="rounded-xl border border-emerald-200/70 dark:border-emerald-900/60 bg-emerald-50/40 dark:bg-emerald-900/15 p-3">
+                              <p className="text-xs text-emerald-800 dark:text-emerald-300">Percentual de agendamentos Captação de vídeos</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{aiCaptacaoVideosSchedulingPercent.toFixed(1)}%</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
+                          <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">Intervenção humana (Outros assuntos)</h3>
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             <div className="rounded-xl border border-fuchsia-200/70 dark:border-fuchsia-900/60 bg-fuchsia-50/60 dark:bg-fuchsia-900/20 p-3">
-                              <p className="text-xs text-fuchsia-800 dark:text-fuchsia-300">Quantidade de atendimentos sobre outras coisas</p>
+                              <p className="text-xs text-fuchsia-800 dark:text-fuchsia-300">Quantidade de atendimentos em intervenção humana</p>
                               <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{otherSubjectAttendances}</p>
                             </div>
                             <div className="rounded-xl border border-fuchsia-200/70 dark:border-fuchsia-900/60 bg-fuchsia-50/40 dark:bg-fuchsia-900/15 p-3">
-                              <p className="text-xs text-fuchsia-800 dark:text-fuchsia-300">Percentual de atendimentos sobre outras coisas</p>
-                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{outrosPercentValue.toFixed(1)}%</p>
+                              <p className="text-xs text-fuchsia-800 dark:text-fuchsia-300">Percentual de atendimentos em intervenção humana</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{pieClassificationPercents.interv.toFixed(1)}%</p>
                             </div>
                           </div>
                         </div>
@@ -5942,11 +6186,11 @@ export const SupervisorDashboard: React.FC = () => {
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             <div className="rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-800/40 p-3">
                               <p className="text-xs text-slate-600 dark:text-slate-400">Quantidade de atendimentos não classificados</p>
-                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{unclassifiedCount}</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{remainderUnclassifiedCount}</p>
                             </div>
                             <div className="rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-slate-50/40 dark:bg-slate-800/30 p-3">
                               <p className="text-xs text-slate-600 dark:text-slate-400">Percentual de atendimentos não classificados</p>
-                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{unclassifiedPercentValue.toFixed(1)}%</p>
+                              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{pieClassificationPercents.uncl.toFixed(1)}%</p>
                             </div>
                           </div>
                         </div>
@@ -5962,20 +6206,24 @@ export const SupervisorDashboard: React.FC = () => {
                         />
                         <div className="mt-5 space-y-2 text-sm">
                           <div className="flex items-center justify-between">
-                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-sky-500" />Prótese capilar</span>
-                            <span className="font-semibold text-slate-900 dark:text-white">{protesePercentValue.toFixed(1)}%</span>
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-sky-500" />Flash Day</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{pieClassificationPercents.flash.toFixed(1)}%</span>
                           </div>
                           <div className="flex items-center justify-between">
-                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-amber-500" />Manutenção</span>
-                            <span className="font-semibold text-slate-900 dark:text-white">{manutencaoPercentValue.toFixed(1)}%</span>
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-amber-500" />Locação de estúdio</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{pieClassificationPercents.loc.toFixed(1)}%</span>
                           </div>
                           <div className="flex items-center justify-between">
-                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-fuchsia-500" />Outras coisas</span>
-                            <span className="font-semibold text-slate-900 dark:text-white">{outrosPercentValue.toFixed(1)}%</span>
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-emerald-500" />Captação de vídeos</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{pieClassificationPercents.cap.toFixed(1)}%</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-fuchsia-500" />Intervenção humana</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{pieClassificationPercents.interv.toFixed(1)}%</span>
                           </div>
                           <div className="flex items-center justify-between">
                             <span className="flex items-center gap-2 text-slate-600 dark:text-slate-300"><span className="w-3 h-3 rounded-full bg-slate-400" />Não classificados</span>
-                            <span className="font-semibold text-slate-900 dark:text-white">{unclassifiedPercentValue.toFixed(1)}%</span>
+                            <span className="font-semibold text-slate-900 dark:text-white">{pieClassificationPercents.uncl.toFixed(1)}%</span>
                           </div>
                         </div>
                       </div>
@@ -7072,6 +7320,50 @@ export const SupervisorDashboard: React.FC = () => {
                   </button>
                 )}
               </div>
+              {(() => {
+                const ac = selectedConversationData?.aiContext;
+                const summary = ac?.interesseConversationSummary;
+                const questions = ac?.interesseClientQuestions;
+                if (!summary && questions == null) return null;
+                const subLabel =
+                  ac?.ai_subdivision === 'flash-day'
+                    ? 'Flash Day'
+                    : ac?.ai_subdivision === 'locacao-estudio'
+                      ? 'Locação de estúdio'
+                      : ac?.ai_subdivision === 'captacao-videos'
+                        ? 'Captação de vídeos'
+                        : 'Interesse (IA)';
+                const questionsLines =
+                  Array.isArray(questions) ? questions : questions != null && String(questions).trim() ? [String(questions)] : [];
+                return (
+                  <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                    <div className="flex items-center space-x-2 mb-3">
+                      <div className="p-1.5 bg-violet-50 dark:bg-violet-900/20 rounded-md">
+                        <span className="material-icons-round text-violet-600 text-sm">auto_awesome</span>
+                      </div>
+                      <span className="font-medium text-xs text-slate-700 dark:text-slate-300">
+                        {subLabel}
+                      </span>
+                    </div>
+                    {summary ? (
+                      <div className="mb-3">
+                        <span className="text-xs text-slate-500 dark:text-slate-400 font-medium block mb-1">Resumo da conversa</span>
+                        <p className="text-xs text-slate-900 dark:text-white font-medium whitespace-pre-wrap break-words">{summary}</p>
+                      </div>
+                    ) : null}
+                    {questionsLines.length > 0 ? (
+                      <div>
+                        <span className="text-xs text-slate-500 dark:text-slate-400 font-medium block mb-1">Perguntas do cliente</span>
+                        <ul className="list-disc list-inside space-y-1 text-xs text-slate-900 dark:text-white font-medium break-words">
+                          {questionsLines.map((line, idx) => (
+                            <li key={idx}>{line}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })()}
               {selectedConversationData?.interventionData && Object.keys(selectedConversationData.interventionData).length > 0 && (
                 <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
                   <div className="flex items-center space-x-2 mb-3">

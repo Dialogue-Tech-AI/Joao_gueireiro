@@ -15,6 +15,10 @@ import { MediaService } from './media.service';
 import { messageBufferService } from './message-buffer.service';
 import { mediaProcessorService } from './media-processor.service';
 import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
+import {
+  clearAgendamentoTimerFields,
+  isSubstantiveClientMessageForAgendamentoTimer,
+} from '../../../attendance/domain/utils/agendamento-auto-close.util';
 
 const FC_NAME_FECHA_BALCAO = 'fechaatendimentobalcao';
 const DEFAULT_TEMPO_FECHAMENTO_BALCAO_MIN = 30;
@@ -473,16 +477,38 @@ export class MessageProcessorService {
             );
           }
 
+          const mediaTypeForAgTimer = whatsappMessage.mediaType || 'text';
+          const displayContentForAgTimer =
+            mediaTypeForAgTimer === 'image'
+              ? (whatsappMessage.text && whatsappMessage.text !== '[Processando imagem...]' ? whatsappMessage.text : '[Imagem]')
+              : mediaTypeForAgTimer === 'audio'
+                ? (whatsappMessage.text && whatsappMessage.text !== '[Processando áudio...]' ? whatsappMessage.text : '[Áudio]')
+                : (whatsappMessage.text || '[Mensagem de mídia]');
+          const prevCtx = ((attendance.aiContext as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+          let mergedAiCtx: Record<string, unknown> = {
+            ...prevCtx,
+            followUpState: {
+              lastClientMessageAt: whatsappMessage.timestamp.toISOString(),
+            },
+          };
+          if (prevCtx.agendamentoAutoCloseAt) {
+            const mediaIsPlainText = mediaTypeForAgTimer === 'text' || !whatsappMessage.mediaType;
+            const substantive = mediaIsPlainText
+              ? isSubstantiveClientMessageForAgendamentoTimer(displayContentForAgTimer)
+              : true;
+            if (substantive) {
+              mergedAiCtx = clearAgendamentoTimerFields(mergedAiCtx);
+              mergedAiCtx.followUpState = {
+                lastClientMessageAt: whatsappMessage.timestamp.toISOString(),
+              };
+            }
+          }
+
           // Update existing attendance - usar update() ao invés de save() para não sobrescrever campos setados por outros processos
           const updateData: any = {
             updatedAt: new Date(),
             lastClientMessageAt: whatsappMessage.timestamp,
-            aiContext: {
-              ...((attendance.aiContext as Record<string, unknown>) ?? {}),
-              followUpState: {
-                lastClientMessageAt: whatsappMessage.timestamp.toISOString(),
-              },
-            },
+            aiContext: mergedAiCtx,
           };
         
           // Se estava aguardando cliente, voltar para EM_ATENDIMENTO
@@ -676,12 +702,20 @@ export class MessageProcessorService {
         });
         
         if (!attendance.sellerId && !isIntervention) {
+          const aiCtx = (attendance.aiContext ?? {}) as Record<string, unknown>;
+          const aiSub = aiCtx.ai_subdivision as string | undefined;
           const unassignedFilter =
             attendance.interventionType === 'encaminhados-ecommerce'
               ? 'encaminhados-ecommerce'
               : attendance.interventionType === 'encaminhados-balcao'
                 ? 'encaminhados-balcao'
-                : 'triagem';
+                : aiSub === 'flash-day'
+                  ? 'ai-flash-day'
+                  : aiSub === 'locacao-estudio'
+                    ? 'ai-locacao-estudio'
+                    : aiSub === 'captacao-videos'
+                      ? 'ai-captacao-videos'
+                      : 'ai-nao-classificados';
           socketService.emitToRoom('supervisors', 'new_unassigned_message', {
             attendanceId: attendance.id,
             messageId: message.id,
@@ -1050,6 +1084,10 @@ export class MessageProcessorService {
     });
 
     await messageRepo.save(message);
+
+    if (attendance.aiContext && (attendance.aiContext as Record<string, unknown>).agendamentoAutoCloseAt) {
+      attendance.aiContext = clearAgendamentoTimerFields(attendance.aiContext as Record<string, unknown>);
+    }
 
     // Ativar/atualizar timer de 1 hora desligada: handledBy = HUMAN, assumedAt = now
     // Cada nova msg fromMe reseta o timer para mais 1 hora

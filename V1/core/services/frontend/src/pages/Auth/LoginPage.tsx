@@ -58,7 +58,7 @@ export const LoginPage: React.FC = () => {
               <span className="material-symbols-outlined text-white text-2xl">corporate_fare</span>
             </div>
             <span className="text-xl font-bold tracking-tighter text-navy-custom dark:text-white uppercase">
-              <span className="text-primary">Fabio Guerreiro</span>
+              <span className="text-primary">Joao Guerreiro</span>
             </span>
           </div>
 

@@ -1,4 +1,4 @@
-import { In, LessThan, Not, IsNull } from 'typeorm';
+import { In, LessThan, Not, IsNull, MoreThanOrEqual } from 'typeorm';
 import { AppDataSource } from '../../../../shared/infrastructure/database/typeorm/config/database.config';
 import { Attendance } from '../../domain/entities/attendance.entity';
 import { AttendanceCase } from '../../domain/entities/attendance-case.entity';
@@ -11,6 +11,12 @@ import { InfrastructureFactory } from '../../../../shared/infrastructure/factori
 import { aiConfigService } from '../../../ai/application/services/ai-config.service';
 import { messageSenderService } from '../../../message/application/services/message-sender.service';
 import { invalidateSubdivisionCountsCache } from '../../presentation/controllers/attendance.controller';
+import {
+  AGENDAMENTO_AUTO_CLOSE_MINUTES,
+  clearAgendamentoTimerFields,
+  isLikelyOnlyThankYouMessage,
+} from '../../domain/utils/agendamento-auto-close.util';
+import { canReceiveFollowUp } from '../../domain/utils/follow-up-eligibility.util';
 
 const FC_NAME_FECHA_BALCAO = 'fechaatendimentobalcao';
 const DEFAULT_TEMPO_INATIVIDADE_BALCAO_MIN = 30; // 30 minutos padrão
@@ -18,9 +24,10 @@ const DEFAULT_TEMPO_INATIVIDADE_BALCAO_MIN = 30; // 30 minutos padrão
 export class AttendanceInactivityService {
   /**
    * Check and send follow-up messages for inactive attendances.
-   * - 1º follow-up: 1h sem resposta do cliente (após resposta AI/HUMANO)
-   * - 2º follow-up: 24h após o 1º follow-up, se cliente ainda não respondeu
-   * - Fechamento automático: 36h de inatividade (após 2º follow-up)
+   * - 1º follow-up: conforme config (inatividade após resposta AI/HUMANO)
+   * - 2º follow-up: após o intervalo configurado desde o 1º, se o cliente ainda não respondeu
+   * - Ao enviar o 2º follow-up: estado operacional → AGUARDANDO_CLIENTE (coluna “Aguardando” no supervisor)
+   * - Fechamento automático: tempo configurado em movimentação (após 2º follow-up), contado desde secondSentAt
    */
   async checkAndCloseInactiveAttendances(): Promise<number> {
     try {
@@ -53,18 +60,23 @@ export class AttendanceInactivityService {
         if (aiContext.closedManually) {
           continue;
         }
-        // Regra: manutenção (demanda-telefone-fixo) não entra no follow-up
-        if (attendance.interventionType === 'demanda-telefone-fixo') {
+        // Intervenção humana (prótese, outros assuntos, manutenção): não entra no follow-up; encaminhados podem
+        if (!canReceiveFollowUp(attendance.interventionType)) {
           continue;
+        }
+        // Timer pós-FC agendamento_* (30 min): não enviar follow-ups só enquanto o prazo ainda não passou
+        const agCloseAt = aiContext.agendamentoAutoCloseAt as string | undefined;
+        if (agCloseAt) {
+          const deadline = new Date(agCloseAt).getTime();
+          if (Number.isFinite(deadline) && deadline > Date.now()) {
+            continue;
+          }
         }
         const followUpState = (aiContext.followUpState ?? {}) as {
           lastClientMessageAt?: string;
           firstSentAt?: string;
           secondSentAt?: string;
         };
-
-        // Regra: apenas demanda-telefone-fixo (manutenção) não tem follow-up. protese-capilar e outros-assuntos
-        // têm follow-up mesmo após function call. (demanda-telefone-fixo já foi excluído acima.)
 
         // Precisa ter mensagem do cliente como base para contagem de inatividade.
         const lastClientMessageAt = attendance.lastClientMessageAt ?? null;
@@ -104,7 +116,8 @@ export class AttendanceInactivityService {
           await attendanceRepo.save(attendance);
         }
 
-        // Fechamento automático: tempo após 2º follow-up (movimentação para Fechados)
+        // Fechamento automático: só após o 2º follow-up (secondSentAt); tempo = moveToFechadosAfterSecondFollowUpMinutes
+        // a partir do envio do 2º (estado AGUARDANDO_CLIENTE = fase “Aguardando” antes de Fechados)
         if (normalizedState.secondSentAt) {
           const secondSentAt = new Date(normalizedState.secondSentAt);
           const closeAfterMs = movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000;
@@ -155,6 +168,8 @@ export class AttendanceInactivityService {
                   secondSentAt: new Date().toISOString(),
                 },
               };
+              // Coluna “Aguardando” (inativo-24h): movimentação explícita; o timer de fechamento usa secondSentAt acima
+              attendance.operationalState = OperationalState.AGUARDANDO_CLIENTE;
               await attendanceRepo.save(attendance);
             }
           }
@@ -333,6 +348,95 @@ export class AttendanceInactivityService {
         error: error.message,
         stack: error.stack,
       });
+      return 0;
+    }
+  }
+
+  /**
+   * Após FCs agendamento_*: em 30 min, fechar se não houver mensagem de humano (plataforma/celular)
+   * nem mensagem substantiva do cliente (só agradecimento não cancela).
+   */
+  async checkAndCloseAgendamentoTimer(): Promise<number> {
+    try {
+      const attendanceRepo = AppDataSource.getRepository(Attendance);
+      const messageRepo = AppDataSource.getRepository(Message);
+      const now = new Date();
+
+      const candidates = await attendanceRepo
+        .createQueryBuilder('a')
+        .where('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+        .andWhere('a.is_finalized = :fin', { fin: false })
+        .andWhere("(a.ai_context->>'agendamentoAutoCloseAt') IS NOT NULL")
+        .andWhere("(a.ai_context->>'agendamentoAutoCloseAt')::timestamp <= :now", { now })
+        .getMany();
+
+      let closedCount = 0;
+
+      for (const attendance of candidates) {
+        const ac = (attendance.aiContext ?? {}) as Record<string, unknown>;
+        const startedRaw = ac.agendamentoTimerStartedAt as string | undefined;
+        const closeAtRaw = ac.agendamentoAutoCloseAt as string | undefined;
+        const startedAt = startedRaw
+          ? new Date(startedRaw)
+          : closeAtRaw
+            ? new Date(new Date(closeAtRaw).getTime() - AGENDAMENTO_AUTO_CLOSE_MINUTES * 60 * 1000)
+            : new Date(0);
+
+        const humanMsg = await messageRepo.findOne({
+          where: {
+            attendanceId: attendance.id,
+            origin: MessageOrigin.SELLER,
+            sentAt: MoreThanOrEqual(startedAt),
+          },
+        });
+        if (humanMsg) {
+          attendance.aiContext = clearAgendamentoTimerFields(ac);
+          await attendanceRepo.save(attendance);
+          continue;
+        }
+
+        const clientAfter = await messageRepo.find({
+          where: {
+            attendanceId: attendance.id,
+            origin: MessageOrigin.CLIENT,
+            sentAt: MoreThanOrEqual(startedAt),
+          },
+          order: { sentAt: 'ASC' },
+        });
+
+        let cancelClose = false;
+        for (const msg of clientAfter) {
+          const meta = (msg.metadata ?? {}) as Record<string, unknown>;
+          const mt = (meta.mediaType as string | undefined) || 'text';
+          if (mt !== 'text') {
+            cancelClose = true;
+            break;
+          }
+          if (!isLikelyOnlyThankYouMessage(msg.content)) {
+            cancelClose = true;
+            break;
+          }
+        }
+
+        if (cancelClose) {
+          attendance.aiContext = clearAgendamentoTimerFields(ac);
+          await attendanceRepo.save(attendance);
+          continue;
+        }
+
+        await this.moveToFechados(attendance, 'agendamento_timer_30min');
+        closedCount++;
+      }
+
+      if (closedCount > 0) {
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+        logger.info('checkAndCloseAgendamentoTimer completed', { closedCount, checked: candidates.length });
+      }
+
+      return closedCount;
+    } catch (error: any) {
+      logger.error('Error in checkAndCloseAgendamentoTimer', { error: error.message, stack: error.stack });
       return 0;
     }
   }
@@ -560,8 +664,11 @@ export class AttendanceInactivityService {
     const attendanceRepo = AppDataSource.getRepository(Attendance);
 
     // Salvar estado anterior no aiContext antes de limpar (para poder restaurar depois, incluindo timer da IA)
+    const ctxBeforeClose = (attendance.aiContext ?? {}) as Record<string, unknown>;
     const previousState = {
       interventionType: attendance.interventionType,
+      /** Foto da subdivisão AI no fechamento (null = não classificados); usada nas estatísticas do supervisor */
+      aiSubdivision: (ctxBeforeClose.ai_subdivision as string | undefined) ?? null,
       sellerSubdivision: attendance.sellerSubdivision,
       operationalState: attendance.operationalState,
       handledBy: attendance.handledBy,

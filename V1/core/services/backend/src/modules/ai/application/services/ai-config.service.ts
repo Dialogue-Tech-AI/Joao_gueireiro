@@ -1068,7 +1068,7 @@ Responda em português brasileiro de forma clara e objetiva.`;
       const parsed = typeof config.value === 'string' ? JSON.parse(config.value) : config.value;
       return {
         moveOpenToFirstFollowUpMinutes: Math.max(1, Math.min(1440, parsed.moveOpenToFirstFollowUpMinutes ?? 60)),
-        moveToFechadosAfterSecondFollowUpMinutes: Math.max(60, Math.min(43200, parsed.moveToFechadosAfterSecondFollowUpMinutes ?? 1440)),
+        moveToFechadosAfterSecondFollowUpMinutes: Math.max(2, Math.min(43200, parsed.moveToFechadosAfterSecondFollowUpMinutes ?? 1440)),
       };
     } catch (error: any) {
       logger.error('Error getting follow-up movement config', { error: error.message });
@@ -1090,8 +1090,8 @@ Responda em português brasileiro de forma clara e objetiva.`;
       if (config.moveOpenToFirstFollowUpMinutes < 1 || config.moveOpenToFirstFollowUpMinutes > 1440) {
         throw new Error('Tempo para mover de Abertos → Aguardando 1º deve estar entre 1 e 1440 minutos');
       }
-      if (config.moveToFechadosAfterSecondFollowUpMinutes < 60 || config.moveToFechadosAfterSecondFollowUpMinutes > 43200) {
-        throw new Error('Tempo após 2º follow-up para Fechados deve estar entre 60 e 43200 minutos');
+      if (config.moveToFechadosAfterSecondFollowUpMinutes < 2 || config.moveToFechadosAfterSecondFollowUpMinutes > 43200) {
+        throw new Error('Tempo após 2º follow-up para Fechados deve estar entre 2 e 43200 minutos');
       }
       let entity = await this.configRepository.findOne({
         where: { key: 'follow_up_movement_config' },

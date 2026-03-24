@@ -7,7 +7,8 @@ import { invalidateSubdivisionCountsCache } from '../../../attendance/presentati
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
 const INTERVENTION_TYPE = 'outros-assuntos';
-const AI_DISABLED_HOURS_AFTER_ROUTING = 24;
+/** IA pausada para o cliente após roteamento para intervenção humana (Outros assuntos) */
+const AI_DISABLED_HOURS_AFTER_ROUTING = 1;
 
 function parseResult(resultRaw: string): Record<string, unknown> {
   try {
@@ -48,14 +49,18 @@ export function createAlocaOutrosAssuntosProcessor(): FunctionCallProcessorHandl
 
       const interventionData = { ...(data as Record<string, unknown>), client_phone } as Record<string, unknown>;
 
-      await attendanceRepo.update(
-        { id: attendance_id },
-        {
-          interventionType: INTERVENTION_TYPE,
-          interventionData,
-          aiDisabledUntil: new Date(Date.now() + AI_DISABLED_HOURS_AFTER_ROUTING * 60 * 60 * 1000),
-        } as any
-      );
+      const aiDisabledUntil = new Date(Date.now() + AI_DISABLED_HOURS_AFTER_ROUTING * 60 * 60 * 1000);
+
+      // Sai da fila AI (não classificados / subdivisões) e vai para Intervenção humana > Outros assuntos
+      attendance.interventionType = INTERVENTION_TYPE;
+      attendance.interventionData = interventionData as any;
+      attendance.aiDisabledUntil = aiDisabledUntil;
+      attendance.aiContext = {
+        ...(attendance.aiContext ?? {}),
+        ai_subdivision: null,
+      };
+
+      await attendanceRepo.save(attendance);
 
       const updatedAttendance = await attendanceRepo.findOne({ where: { id: attendance_id } });
       logger.info(`${function_call_name}: atendimento movido para intervencao outros assuntos`, {
@@ -71,6 +76,7 @@ export function createAlocaOutrosAssuntosProcessor(): FunctionCallProcessorHandl
         attendanceId: attendance_id,
         interventionType: INTERVENTION_TYPE,
         interventionData,
+        aiDisabledUntil: aiDisabledUntil.toISOString(),
       };
 
       try {
