@@ -24,13 +24,13 @@ git pull origin master
 # Parar serviços (mantém volumes - dados do banco preservados)
 echo ""
 echo "=== 2. Parando containers ==="
-docker compose -f config/vps/docker-compose.vps.yml down
+docker compose -f docker-compose.vps.yml down
 
 # Subir tudo com rebuild - db-init roda migrations automaticamente antes do app
 echo ""
 echo "=== 3. Subindo aplicação (build + up) ==="
-docker compose -f config/vps/docker-compose.vps.yml up -d --build
+docker compose -f docker-compose.vps.yml up -d --build
 
 echo ""
 echo "=== 4. Deploy concluído! ==="
-docker compose -f config/vps/docker-compose.vps.yml ps
+docker compose -f docker-compose.vps.yml ps

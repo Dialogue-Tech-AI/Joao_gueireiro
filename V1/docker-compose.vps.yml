@@ -1,9 +1,10 @@
 # ============================================================
-# Plataforma Guerreiros - VPS (rodar da pasta V1)
+# Plataforma Guerreiros - VPS (Execute da pasta V1)
 # ============================================================
-# Uso: cd V1 && docker compose -f docker-compose.vps.yml up -d --build
-# Ou: docker compose -f docker-compose.vps.yml --project-directory . up -d --build
+# Uso: cd ~/Guerreiros/V1 && docker compose -f docker-compose.vps.yml up -d --build
 # ============================================================
+
+name: guerreiros-vps
 
 services:
   postgres:
@@ -120,7 +121,7 @@ services:
   db-init:
     build:
       context: ./core
-      dockerfile: ../config/dockerfiles/db-init.Dockerfile
+      dockerfile: ./config/dockerfiles/db-init.Dockerfile
     container_name: guerreiros-db-init
     restart: "no"
     env_file:
@@ -139,7 +140,7 @@ services:
   app:
     build:
       context: ./core/services/backend
-      dockerfile: ../../../config/dockerfiles/backend.Dockerfile
+      dockerfile: ./config/dockerfiles/backend.Dockerfile
     container_name: guerreiros-app
     restart: unless-stopped
     env_file:
@@ -166,7 +167,7 @@ services:
   ai-worker:
     build:
       context: ./core/services/ai-worker
-      dockerfile: ../../../config/dockerfiles/ai-worker.Dockerfile
+      dockerfile: ./config/dockerfiles/ai-worker.Dockerfile
     container_name: guerreiros-ai-worker
     restart: unless-stopped
     env_file:
@@ -180,14 +181,11 @@ services:
   frontend:
     build:
       context: ./core/services/frontend
-      dockerfile: ../../../config/dockerfiles/frontend.Dockerfile
+      dockerfile: ./config/dockerfiles/frontend.Dockerfile
     container_name: guerreiros-frontend
     restart: unless-stopped
     ports:
       - "80:80"
-      - "443:443"
-    volumes:
-      - ../ssl:/etc/nginx/ssl:ro
     depends_on:
       app:
         condition: service_healthy
@@ -202,10 +200,15 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
   redis_data:
+    driver: local
   rabbitmq_data:
+    driver: local
   minio_data:
+    driver: local
   qdrant_data:
+    driver: local
 
 networks:
   guerreiros-network:

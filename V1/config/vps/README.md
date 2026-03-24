@@ -35,8 +35,8 @@ docker compose -f docker-compose.vps.yml up -d --build
 Ou use o script:
 ```bash
 cd ~/Guerreiros/V1
-chmod +x deploy-vps.sh
-./deploy-vps.sh
+chmod +x config/vps/deploy-vps.sh
+bash config/vps/deploy-vps.sh
 ```
 
 Migrations e seed rodam automaticamente via o servico `db-init` antes do app subir.

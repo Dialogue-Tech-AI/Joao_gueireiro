@@ -22,15 +22,15 @@ git pull origin master
 
 echo ''
 echo '=== 2. Parando containers ==='
-docker compose -f config/vps/docker-compose.vps.yml down
+docker compose -f docker-compose.vps.yml down
 
 echo ''
 echo '=== 3. Subindo aplicacao (build + migrations via db-init) ==='
-docker compose -f config/vps/docker-compose.vps.yml up -d --build
+docker compose -f docker-compose.vps.yml up -d --build
 
 echo ''
 echo '=== Deploy concluido! ==='
-docker compose -f config/vps/docker-compose.vps.yml ps
+docker compose -f docker-compose.vps.yml ps
 "@
 
 $remoteScript | ssh -o StrictHostKeyChecking=no $VPS_HOST "bash -s"
