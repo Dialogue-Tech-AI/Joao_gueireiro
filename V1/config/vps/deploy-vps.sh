@@ -25,8 +25,8 @@ git pull origin master
 echo ""
 echo "=== 2. Parando e removendo containers ==="
 docker compose -f docker-compose.vps.yml down --remove-orphans
-# Remove containers órfãos que podem ter ficado de runs anteriores (ex: minio-init)
-docker rm -f guerreiros-minio-init 2>/dev/null || true
+# Remove containers one-shot órfãos (exited mas não removidos em runs anteriores)
+for c in guerreiros-minio-init guerreiros-db-init; do docker rm -f $c 2>/dev/null || true; done
 
 # Subir tudo com rebuild - db-init roda migrations automaticamente antes do app
 echo ""
