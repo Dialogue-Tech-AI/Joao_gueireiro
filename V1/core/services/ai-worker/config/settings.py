@@ -1,8 +1,53 @@
 """Configuration settings for AI Worker"""
 import os
+from urllib.parse import urlparse, urlunparse
+
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+
+def _swap_url_host_if_localhost(url: str, new_host: str) -> str:
+    """Compose VPS: env copiado do PC com localhost → nome do serviço Docker."""
+    if not url:
+        return url
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return url
+    if p.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return url
+    user = p.username or ""
+    password = p.password or ""
+    port = p.port
+    if password:
+        auth = f"{user}:{password}"
+    elif user:
+        auth = user
+    else:
+        auth = ""
+    if auth:
+        netloc = f"{auth}@{new_host}:{port}" if port else f"{auth}@{new_host}"
+    else:
+        netloc = f"{new_host}:{port}" if port else new_host
+    return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
+
+
+def _apply_vps_docker_network_overrides() -> None:
+    if os.getenv("JOAO_VPS_DOCKER_NETWORK") != "1":
+        return
+    pg = os.getenv("POSTGRES_URL", "")
+    if pg:
+        os.environ["POSTGRES_URL"] = _swap_url_host_if_localhost(pg, "postgres")
+    amqp = os.getenv("RABBITMQ_URL", "")
+    if amqp:
+        os.environ["RABBITMQ_URL"] = _swap_url_host_if_localhost(amqp, "rabbitmq")
+    rh = os.getenv("REDIS_HOST", "")
+    if rh in ("localhost", "127.0.0.1", "::1"):
+        os.environ["REDIS_HOST"] = "redis"
+    qh = os.getenv("QDRANT_HOST", "")
+    if qh in ("localhost", "127.0.0.1", "::1"):
+        os.environ["QDRANT_HOST"] = "qdrant"
 
 # Procurar ai-worker.local.env / ai-worker.prod.env em config/local ou config/server (relativo a core/services/ai-worker)
 _current_dir = os.path.dirname(os.path.abspath(__file__))       # ai-worker/config
@@ -29,6 +74,8 @@ _env_file_for_pydantic = (
 )
 if _env_file_for_pydantic:
     load_dotenv(_env_file_for_pydantic)
+
+_apply_vps_docker_network_overrides()
 
 
 class Settings(BaseSettings):
