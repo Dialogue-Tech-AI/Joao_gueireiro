@@ -173,6 +173,8 @@ services:
       dockerfile: ../../../config/dockerfiles/backend.Dockerfile
     container_name: joao_guerreiro-app
     restart: unless-stopped
+    environment:
+      JOAO_VPS_DOCKER_NETWORK: "1"
     env_file:
       - ./credentials/backend.vps.env
     depends_on:
@@ -200,6 +202,8 @@ services:
       dockerfile: ../../../config/dockerfiles/ai-worker.Dockerfile
     container_name: joao_guerreiro-ai-worker
     restart: unless-stopped
+    environment:
+      JOAO_VPS_DOCKER_NETWORK: "1"
     env_file:
       - ./credentials/ai-worker.vps.env
     depends_on:

@@ -83,6 +83,23 @@ export function applyEnvMode(env: NodeJS.ProcessEnv = process.env): void {
 }
 
 /**
+ * Compose VPS (`JOAO_VPS_DOCKER_NETWORK=1`): muitos copiam `backend.local.env` com
+ * DB_HOST_DEV=localhost — dentro do contentor isso é inválido. Corrige para os nomes
+ * dos serviços na rede Docker.
+ */
+function applyDockerComposeServiceHosts(env: NodeJS.ProcessEnv): void {
+  if (env.JOAO_VPS_DOCKER_NETWORK !== '1') return;
+
+  const isLocalHost = (v: string | undefined): boolean =>
+    v === 'localhost' || v === '127.0.0.1' || v === '::1';
+
+  if (isLocalHost(env.DB_HOST)) env.DB_HOST = 'postgres';
+  if (isLocalHost(env.REDIS_HOST)) env.REDIS_HOST = 'redis';
+  if (isLocalHost(env.RABBITMQ_HOST)) env.RABBITMQ_HOST = 'rabbitmq';
+  if (isLocalHost(env.MINIO_ENDPOINT)) env.MINIO_ENDPOINT = 'minio';
+}
+
+/**
  * Carrega o arquivo `.env` e aplica a seleção de ambiente (DEV/PROD) usando `applyEnvMode`.
  * Ordem de busca:
  *   1) DOTENV_PATH
@@ -97,6 +114,7 @@ export function loadEnv(fromPath?: string): void {
       console.warn(`Não foi possível carregar o arquivo de ambiente em ${fromPath}:`, result.error.message);
     }
     applyEnvMode(process.env);
+    applyDockerComposeServiceHosts(process.env);
     return;
   }
 
@@ -119,5 +137,6 @@ export function loadEnv(fromPath?: string): void {
   // Docker: variáveis vêm do env_file do Compose (já em process.env); não há ficheiro no disco.
 
   applyEnvMode(process.env);
+  applyDockerComposeServiceHosts(process.env);
 }
 
