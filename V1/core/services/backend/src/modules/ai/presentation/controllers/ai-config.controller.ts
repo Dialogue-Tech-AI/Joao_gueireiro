@@ -87,6 +87,14 @@ export class AIConfigController {
     // Subdivision inactivity timeouts configuration
     this.router.get('/subdivision-inactivity-timeouts', this.getSubdivisionInactivityTimeouts.bind(this));
     this.router.put('/subdivision-inactivity-timeouts', this.updateSubdivisionInactivityTimeouts.bind(this));
+
+    // Follow-up configuration (times and messages for inactive attendances)
+    this.router.get('/follow-up-config', this.getFollowUpConfig.bind(this));
+    this.router.put('/follow-up-config', this.updateFollowUpConfig.bind(this));
+
+    // Follow-up movement configuration (when to move between divisions)
+    this.router.get('/follow-up-movement-config', this.getFollowUpMovementConfig.bind(this));
+    this.router.put('/follow-up-movement-config', this.updateFollowUpMovementConfig.bind(this));
   }
 
   private async getAgentPrompt(req: Request, res: Response): Promise<void> {
@@ -1485,6 +1493,92 @@ export class AIConfigController {
       res.status(500).json({
         success: false,
         error: error.message || 'Erro ao atualizar tempos de inatividade por subdivisão',
+      });
+    }
+  }
+
+  /**
+   * GET /ai/config/follow-up-config
+   */
+  private async getFollowUpConfig(req: Request, res: Response): Promise<void> {
+    try {
+      const config = await aiConfigService.getFollowUpConfig();
+      res.json({ success: true, data: config });
+    } catch (error: any) {
+      logger.error('Error in getFollowUpConfig', { error: error.message });
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erro ao buscar configuração de follow-up',
+      });
+    }
+  }
+
+  /**
+   * PUT /ai/config/follow-up-config
+   */
+  private async updateFollowUpConfig(req: Request, res: Response): Promise<void> {
+    try {
+      const body = req.body as {
+        firstDelayMinutes?: number;
+        secondDelayMinutes?: number;
+        closeDelayMinutes?: number;
+        firstMessage?: string;
+        secondMessage?: string;
+      };
+      const config = await aiConfigService.getFollowUpConfig();
+      const updated = await aiConfigService.updateFollowUpConfig({
+        firstDelayMinutes: body.firstDelayMinutes ?? config.firstDelayMinutes,
+        secondDelayMinutes: body.secondDelayMinutes ?? config.secondDelayMinutes,
+        closeDelayMinutes: body.closeDelayMinutes ?? config.closeDelayMinutes,
+        firstMessage: body.firstMessage ?? config.firstMessage,
+        secondMessage: body.secondMessage ?? config.secondMessage,
+      });
+      res.json({ success: true, data: updated });
+    } catch (error: any) {
+      logger.error('Error in updateFollowUpConfig', { error: error.message });
+      res.status(400).json({
+        success: false,
+        error: error.message || 'Erro ao atualizar configuração de follow-up',
+      });
+    }
+  }
+
+  /**
+   * GET /ai/config/follow-up-movement-config
+   */
+  private async getFollowUpMovementConfig(req: Request, res: Response): Promise<void> {
+    try {
+      const config = await aiConfigService.getFollowUpMovementConfig();
+      res.json({ success: true, data: config });
+    } catch (error: any) {
+      logger.error('Error in getFollowUpMovementConfig', { error: error.message });
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erro ao buscar configuração de movimentação',
+      });
+    }
+  }
+
+  /**
+   * PUT /ai/config/follow-up-movement-config
+   */
+  private async updateFollowUpMovementConfig(req: Request, res: Response): Promise<void> {
+    try {
+      const body = req.body as {
+        moveOpenToFirstFollowUpMinutes?: number;
+        moveToFechadosAfterSecondFollowUpMinutes?: number;
+      };
+      const config = await aiConfigService.getFollowUpMovementConfig();
+      const updated = await aiConfigService.updateFollowUpMovementConfig({
+        moveOpenToFirstFollowUpMinutes: body.moveOpenToFirstFollowUpMinutes ?? config.moveOpenToFirstFollowUpMinutes,
+        moveToFechadosAfterSecondFollowUpMinutes: body.moveToFechadosAfterSecondFollowUpMinutes ?? config.moveToFechadosAfterSecondFollowUpMinutes,
+      });
+      res.json({ success: true, data: updated });
+    } catch (error: any) {
+      logger.error('Error in updateFollowUpMovementConfig', { error: error.message });
+      res.status(400).json({
+        success: false,
+        error: error.message || 'Erro ao atualizar configuração de movimentação',
       });
     }
   }

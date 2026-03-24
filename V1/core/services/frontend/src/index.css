@@ -37,6 +37,99 @@
   }
 }
 
+/* Animação fade ao carregar conversas/chat na página de atendimentos (opacidade 0 → 100) */
+@keyframes slideRollIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-slideRollIn {
+  animation: slideRollIn 0.6s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
+/* Entrada suave ao clicar no contato: fade + leve deslize (chat + sidebar como um todo) */
+@keyframes chatPaneEntrance {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-chatPaneEntrance {
+  animation: chatPaneEntrance 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+
+@keyframes sidebarPaneEntrance {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-sidebarPaneEntrance {
+  animation: sidebarPaneEntrance 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+
+/* Transição suave ao assumir/devolver: crescer e encolher */
+@keyframes assumeBannerGrow {
+  from {
+    max-height: 0;
+    opacity: 0;
+  }
+  to {
+    max-height: 220px;
+    opacity: 1;
+  }
+}
+
+@keyframes assumeBannerShrink {
+  from {
+    max-height: 220px;
+    opacity: 0;
+  }
+  to {
+    max-height: 180px;
+    opacity: 1;
+  }
+}
+
+.animate-assumeBannerGrow {
+  overflow: hidden;
+  animation: assumeBannerGrow 1s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.animate-assumeBannerShrink {
+  overflow: hidden;
+  animation: assumeBannerShrink 1s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Texto interno: fade 0→100 ao trocar */
+@keyframes innerTextFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-innerTextFade {
+  animation: innerTextFade 0.5s ease-out forwards;
+}
+
+/* Fade da página inteira no reload/carregamento inicial (sem transição de direção) */
+.page-load-fade {
+  animation: slideRollIn 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+}
+
 .animate-fadeIn {
   animation: fadeIn 0.2s ease-in-out;
 }
@@ -174,4 +267,40 @@ code {
 body > #root > div > main {
   background-color: #F0F0F0 !important;
   background: #F0F0F0 !important;
+}
+
+/* Painéis Entrada+Conversas: slide na mesma direção da área direita */
+@keyframes chatPanelsSlideInMobile {
+  from { transform: translate3d(-100%, 0, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+@keyframes chatPanelsSlideInDesktop {
+  from { transform: translate3d(0, -100%, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+.chat-panels-slide-in {
+  backface-visibility: hidden;
+  animation: chatPanelsSlideInMobile 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+}
+@media (min-width: 768px) {
+  .chat-panels-slide-in {
+    animation: chatPanelsSlideInDesktop 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+  }
+}
+
+/* Abas Supervisor: transição fluida com GPU (translate3d), contain e backface para 60fps */
+.supervisor-tab-panel {
+  backface-visibility: hidden;
+  contain: layout paint;
+  transition: transform 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+/* Mobile: horizontal */
+.supervisor-tab-mobile-left { transform: translate3d(-100%, 0, 0); }
+.supervisor-tab-mobile-center { transform: translate3d(0, 0, 0); }
+.supervisor-tab-mobile-right { transform: translate3d(100%, 0, 0); }
+/* Desktop: vertical */
+@media (min-width: 768px) {
+  .supervisor-tab-desktop-up { transform: translate3d(0, -100%, 0); }
+  .supervisor-tab-desktop-center { transform: translate3d(0, 0, 0); }
+  .supervisor-tab-desktop-down { transform: translate3d(0, 100%, 0); }
 }

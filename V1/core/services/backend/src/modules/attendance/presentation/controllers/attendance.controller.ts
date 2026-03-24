@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import { Not, In } from 'typeorm';
+import { Not, In, LessThan } from 'typeorm';
 import { AppDataSource } from '../../../../shared/infrastructure/database/typeorm/config/database.config';
 import { Attendance } from '../../domain/entities/attendance.entity';
 import { Message } from '../../../message/domain/entities/message.entity';
@@ -81,6 +81,10 @@ export class AttendanceController {
     this.router.get(
       '/supervisor/subdivision-counts',
       this.getSubdivisionCounts.bind(this)
+    );
+    this.router.get(
+      '/supervisor/follow-up',
+      this.getFollowUpAttendances.bind(this)
     );
 
     // Get supervisor statistics (cards + by brand)
@@ -744,15 +748,21 @@ export class AttendanceController {
 
       const filter = (req.query.filter as string) || 'todos';
       const attendanceRepo = AppDataSource.getRepository(Attendance);
+      const messageRepo = AppDataSource.getRepository(Message);
+      const movementConfig = await aiConfigService.getFollowUpMovementConfig();
+      const moveOpenToFirstCutoff = new Date(
+        Date.now() - movementConfig.moveOpenToFirstFollowUpMinutes * 60 * 1000
+      );
       
       // IMPORTANTE: Filtrar attendances SEM sellerId (não roteados), não finalizados e NÃO FECHADOS
+      // Exclui AGUARDANDO_PRIMEIRA_MSG: atendimentos criados via Chamar que ainda não enviaram 1ª msg (não entram em subdivisões)
       // sellerId null garante que não foram roteados para vendedores
       // operationalState != FECHADO_OPERACIONAL garante que atendimentos fechados não aparecem
       let allUnassigned = await attendanceRepo.find({
         where: { 
           sellerId: null, 
           isFinalized: false,
-          operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
+          operationalState: Not(In([OperationalState.FECHADO_OPERACIONAL, OperationalState.AGUARDANDO_PRIMEIRA_MSG])),
         },
         order: { updatedAt: 'DESC' },
       });
@@ -769,23 +779,93 @@ export class AttendanceController {
       const isTriagemState = (a: Attendance) =>
         a.operationalState === OperationalState.TRIAGEM || a.operationalState == null;
 
+      /** Atendimentos iniciados pelo supervisor na aba Contatos (Chamar): ABERTO, sem seller, sem interventionType */
+      const isChamadoContatos = (a: Attendance) =>
+        a.operationalState === OperationalState.ABERTO && !a.sellerId && !a.interventionType;
+
+      /**
+       * Fluxo AI em abertos (não atribuídos, sem intervenção):
+       * não pode "sumir" quando muda para EM_ATENDIMENTO/AGUARDANDO_CLIENTE.
+       */
+      const isAiOpenFlow = (a: Attendance) =>
+        !a.sellerId &&
+        !a.interventionType &&
+        (
+          a.operationalState === OperationalState.TRIAGEM ||
+          a.operationalState === OperationalState.ABERTO ||
+          a.operationalState === OperationalState.EM_ATENDIMENTO ||
+          a.operationalState === OperationalState.AGUARDANDO_CLIENTE ||
+          a.operationalState == null
+        );
+
+      const isInFollowUpFlow = async (a: Attendance): Promise<boolean> => {
+        const aiContext = (a.aiContext ?? {}) as Record<string, any>;
+        if (aiContext.closedManually) return false;
+        if (a.interventionType === 'demanda-telefone-fixo') return false;
+
+        const followUpState = (aiContext.followUpState ?? {}) as {
+          firstSentAt?: string;
+          secondSentAt?: string;
+        };
+
+        // Após 1º envio já deve sair de "Abertos" e entrar no funil de follow-up.
+        if (followUpState.firstSentAt || followUpState.secondSentAt) {
+          return true;
+        }
+
+        const lastClientMessageAt = a.lastClientMessageAt ?? null;
+        if (!lastClientMessageAt || lastClientMessageAt >= moveOpenToFirstCutoff) {
+          return false;
+        }
+
+        // Mesma regra do job: só entra no follow-up se houve resposta AI/HUMANO após cliente.
+        const replyAfterClient = await messageRepo.findOne({
+          where: {
+            attendanceId: a.id,
+            origin: In([MessageOrigin.AI, MessageOrigin.SELLER]),
+            sentAt: Not(LessThan(lastClientMessageAt)),
+          },
+          order: { sentAt: 'DESC' },
+        });
+
+        return !!replyAfterClient;
+      };
+
       let attendances: typeof allUnassigned;
       if (filter === 'todos') {
-        // Triagem exige operationalState TRIAGEM (evita exibir atendimentos com estado ABERTO que ficaram sem sellerId)
-        attendances = allUnassigned.filter((a) => (isTriagem(a) && isTriagemState(a)) || a.interventionType === 'encaminhados-ecommerce' || a.interventionType === 'encaminhados-balcao');
+        // Inclui todo o fluxo AI em Abertos + encaminhados
+        attendances = allUnassigned.filter(
+          (a) =>
+            isAiOpenFlow(a) ||
+            a.interventionType === 'encaminhados-ecommerce' ||
+            a.interventionType === 'encaminhados-balcao' ||
+            isChamadoContatos(a)
+        );
       } else if (filter === 'triagem') {
-        attendances = allUnassigned.filter((a) => isTriagem(a) && isTriagemState(a));
+        // "Triagem" agora representa o fluxo AI aberto não atribuído (incluindo estados intermediários)
+        attendances = allUnassigned.filter((a) => isAiOpenFlow(a));
       } else if (filter === 'encaminhados-ecommerce') {
         attendances = allUnassigned.filter((a) => a.interventionType === 'encaminhados-ecommerce');
       } else if (filter === 'encaminhados-balcao') {
         attendances = allUnassigned.filter((a) => a.interventionType === 'encaminhados-balcao');
       } else {
-        attendances = allUnassigned.filter((a) => isTriagem(a) && isTriagemState(a));
+        attendances = allUnassigned.filter((a) => isAiOpenFlow(a));
+      }
+
+      // Remover do "Abertos/AI" quem já entrou no fluxo de follow-up.
+      if (filter === 'todos' || filter === 'triagem') {
+        const filtered: Attendance[] = [];
+        for (const attendance of attendances) {
+          if (isAiOpenFlow(attendance) && await isInFollowUpFlow(attendance)) {
+            continue;
+          }
+          filtered.push(attendance);
+        }
+        attendances = filtered;
       }
       attendances = await filterBlacklistedAttendances(attendances);
 
       // Get last message for each attendance
-      const messageRepo = AppDataSource.getRepository(Message);
       const conversations = await Promise.all(
         attendances.map(async (attendance) => {
           // Get last message
@@ -826,31 +906,30 @@ export class AttendanceController {
             });
           }
 
-          // Extract client name from phone number or metadata
+          // Extract client name: aiContext (ex.: import CSV) > pushName das msgs > telefone
           const clientPhone = attendance.clientPhone;
-          let clientName = clientPhone.split('@')[0]; // Remove @s.whatsapp.net if present
-          
-          // Try to get pushName from any client message (not just last message)
-          // Search for the most recent client message with pushName
-          if (!lastMessage?.metadata?.pushName) {
-            const clientMessages = await messageRepo.find({
-              where: {
-                attendanceId: attendance.id,
-                origin: MessageOrigin.CLIENT,
-              },
-              order: { sentAt: 'DESC' },
-              take: 10, // Check last 10 client messages
-            });
-            
-            // Find the most recent message with pushName
-            for (const msg of clientMessages) {
-              if (msg.metadata?.pushName) {
-                clientName = msg.metadata.pushName;
-                break;
+          const aiContext = (attendance.aiContext ?? {}) as Record<string, unknown>;
+          let clientName =
+            (typeof aiContext.clientName === 'string' && aiContext.clientName.trim()
+              ? aiContext.clientName.trim()
+              : null) ?? null;
+          if (!clientName) {
+            clientName = clientPhone.split('@')[0];
+            if (lastMessage?.metadata?.pushName) {
+              clientName = lastMessage.metadata.pushName;
+            } else {
+              const clientMessages = await messageRepo.find({
+                where: { attendanceId: attendance.id, origin: MessageOrigin.CLIENT },
+                order: { sentAt: 'DESC' },
+                take: 10,
+              });
+              for (const msg of clientMessages) {
+                if (msg.metadata?.pushName) {
+                  clientName = msg.metadata.pushName;
+                  break;
+                }
               }
             }
-          } else {
-            clientName = lastMessage.metadata.pushName;
           }
 
           const unassignedSource: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' =
@@ -1033,13 +1112,28 @@ export class AttendanceController {
       }
 
       const attendanceRepo = AppDataSource.getRepository(Attendance);
-      let attendances = await attendanceRepo.find({
-        where: {
-          interventionType: type,
-          operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
-        },
-        order: { updatedAt: 'DESC' },
-      });
+      const movementConfig = await aiConfigService.getFollowUpMovementConfig();
+      const moveOpenToFirstCutoff = new Date(Date.now() - movementConfig.moveOpenToFirstFollowUpMinutes * 60 * 1000);
+      const minSecondSentAt = new Date(
+        Date.now() - movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000
+      ).toISOString();
+      const notInFollowUpCondition = `NOT (
+        a.last_client_message_at IS NOT NULL
+        AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true'
+        AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN ('AI', 'SELLER') AND mr.sent_at >= a.last_client_message_at)
+        AND (
+          ((a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :moveOpenToFirstCutoff)
+          OR ((a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL)
+          OR ((a.ai_context #>> '{followUpState,secondSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') >= :minSecondSentAt)
+        )
+      )`;
+      let attendances = await attendanceRepo
+        .createQueryBuilder('a')
+        .where('a.intervention_type = :type', { type })
+        .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
+        .orderBy('a.updated_at', 'DESC')
+        .getMany();
       attendances = await filterBlacklistedAttendances(attendances);
 
       const messageRepo = AppDataSource.getRepository(Message);
@@ -1567,24 +1661,63 @@ export class AttendanceController {
       const attendanceRepo = AppDataSource.getRepository(Attendance);
       const counts: Record<string, number> = {};
 
+      const movementConfig = await aiConfigService.getFollowUpMovementConfig();
+      const moveOpenToFirstCutoff = new Date(Date.now() - movementConfig.moveOpenToFirstFollowUpMinutes * 60 * 1000);
+      const minSecondSentAt = new Date(
+        Date.now() - movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000
+      ).toISOString();
+
       const isTriagem = (a: Attendance) =>
         a.interventionType !== 'demanda-telefone-fixo' &&
         a.interventionType !== 'encaminhados-ecommerce' &&
         a.interventionType !== 'encaminhados-balcao' &&
         a.interventionType !== 'protese-capilar' &&
         a.interventionType !== 'outros-assuntos';
-      const isTriagemState = (a: Attendance) =>
-        a.operationalState === OperationalState.TRIAGEM || a.operationalState == null;
+      /** Inclui TRIAGEM, ABERTO, EM_ATENDIMENTO, AGUARDANDO_CLIENTE - fluxo AI em andamento. Alinha com isAiOpenFlow da listagem. */
+      const isAiOpenFlowState = (a: Attendance) =>
+        a.operationalState === OperationalState.TRIAGEM ||
+        a.operationalState === OperationalState.ABERTO ||
+        a.operationalState === OperationalState.EM_ATENDIMENTO ||
+        a.operationalState === OperationalState.AGUARDANDO_CLIENTE ||
+        a.operationalState == null;
+
+      /** Excluir do triagem quem já entrou no follow-up (ex.: após 1h inatividade) */
+      const notInFollowUpCondition = `NOT (
+        a.last_client_message_at IS NOT NULL
+        AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true'
+        AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo')
+        AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN ('AI', 'SELLER') AND mr.sent_at >= a.last_client_message_at)
+        AND (
+          ((a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :moveOpenToFirstCutoff)
+          OR ((a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL)
+          OR ((a.ai_context #>> '{followUpState,secondSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') >= :minSecondSentAt)
+        )
+      )`;
+
+      const triagemCount = await attendanceRepo
+        .createQueryBuilder('a')
+        .where('a.seller_id IS NULL')
+        .andWhere('a.is_finalized = :fin', { fin: false })
+        .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+        .andWhere(
+          "(a.intervention_type IS NULL OR a.intervention_type NOT IN ('demanda-telefone-fixo', 'encaminhados-ecommerce', 'encaminhados-balcao', 'protese-capilar', 'outros-assuntos'))"
+        )
+        .andWhere(
+          "(a.operational_state IN (:...aiStates) OR a.operational_state IS NULL)",
+          { aiStates: [OperationalState.TRIAGEM, OperationalState.ABERTO, OperationalState.EM_ATENDIMENTO, OperationalState.AGUARDANDO_CLIENTE] }
+        )
+        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
+        .getCount();
+      counts['triagem'] = triagemCount;
 
       const allUnassigned = await attendanceRepo.find({
         where: { 
           sellerId: null as any, 
           isFinalized: false,
-          operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
+          operationalState: Not(In([OperationalState.FECHADO_OPERACIONAL, OperationalState.AGUARDANDO_PRIMEIRA_MSG])),
         },
         select: ['id', 'interventionType', 'operationalState'],
       });
-      counts['triagem'] = allUnassigned.filter((a) => isTriagem(a) && isTriagemState(a)).length;
       counts['encaminhados-ecommerce'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-ecommerce').length;
       counts['encaminhados-balcao'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-balcao').length;
 
@@ -1596,6 +1729,7 @@ export class AttendanceController {
         .where('a.is_finalized = :fin', { fin: false })
         .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
         .andWhere('a.intervention_type IN (:...types)', { types: interventionTypes as unknown as string[] })
+        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
         .groupBy('a.intervention_type')
         .getRawMany();
       const interventionMap = new Map<string, number>();
@@ -1640,14 +1774,22 @@ export class AttendanceController {
       }
       counts['attributed'] = await attributedQb.getCount();
 
-      // Total "Abertos": todos os atendimentos não fechados visíveis ao supervisor
+      // Total "Abertos": atendimentos não fechados visíveis ao supervisor, excluindo quem está em follow-up
+      // Exclui AGUARDANDO_PRIMEIRA_MSG (Chamar sem 1ª msg ainda)
       const openQb = attendanceRepo
         .createQueryBuilder('a')
         .where('a.is_finalized = :fin', { fin: false })
         .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+        .andWhere('(a.operational_state IS NULL OR a.operational_state != :awaitingFirst)', {
+          awaitingFirst: OperationalState.AGUARDANDO_PRIMEIRA_MSG,
+        })
         .andWhere(
           '(a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId))',
           { supervisorId }
+        )
+        .andWhere(
+          `(a.seller_id IS NOT NULL OR (${notInFollowUpCondition}))`,
+          { moveOpenToFirstCutoff, minSecondSentAt }
         );
       counts['abertos'] = await openQb.getCount();
       
@@ -1708,60 +1850,57 @@ export class AttendanceController {
         .getRawOne();
       counts['fechados'] = parseInt(fechadosCountResult?.count || '0', 10);
 
-      // Contagens Follow up (fluxo 1h/24h/36h):
-      // - inativo-1h: >1h sem resposta e aguardando 1º follow-up
-      // - inativo-12h: já recebeu 1º follow-up e aguarda 2º (24h)
-      // - inativo-24h: já recebeu 2º follow-up e permanece até 36h de inatividade
-      // - follow-up: soma das 3 fases acima
+      // Contagens Follow up (tempos da config de movimentação):
+      // - inativo-1h: passou do tempo para mover Abertos→Aguardando 1º e ainda não recebeu 1º
+      // - inativo-12h: já recebeu 1º follow-up (movimento automático) e ainda não recebeu 2º
+      // - inativo-24h: já recebeu 2º follow-up e ainda não atingiu tempo para Fechados
+      const moveToFechadosMinutes = movementConfig.moveToFechadosAfterSecondFollowUpMinutes;
       const followUpBaseWhere =
-        "a.is_finalized = :fin AND a.operational_state = :awaitingClient AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at) AND NOT (a.intervention_type IS NOT NULL AND COALESCE((SELECT m.origin FROM messages m WHERE m.attendance_id = a.id ORDER BY m.sent_at DESC LIMIT 1), :clientOrigin) != :clientOrigin)";
+        "a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at)";
       const followUpParams = {
         fin: false,
-        awaitingClient: OperationalState.AGUARDANDO_CLIENTE,
+        followUpStates: [
+          OperationalState.TRIAGEM,
+          OperationalState.ABERTO,
+          OperationalState.EM_ATENDIMENTO,
+          OperationalState.AGUARDANDO_CLIENTE,
+        ],
         supervisorId,
-        clientOrigin: MessageOrigin.CLIENT,
         aiOrigin: MessageOrigin.AI,
         sellerOrigin: MessageOrigin.SELLER,
       };
-      const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-      const thirtySixHoursAgo = new Date();
-      thirtySixHoursAgo.setHours(thirtySixHoursAgo.getHours() - 36);
-
       counts['inativo-1h'] = await attendanceRepo
         .createQueryBuilder('a')
         .where(
           followUpBaseWhere +
-            " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :oneHourAgo",
+            " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :moveOpenToFirstCutoff",
           {
             ...followUpParams,
-            oneHourAgo,
+            moveOpenToFirstCutoff,
           }
         )
         .getCount();
 
-      const twelveHoursAgo = new Date();
-      twelveHoursAgo.setHours(twelveHoursAgo.getHours() - 12);
       counts['inativo-12h'] = await attendanceRepo
         .createQueryBuilder('a')
         .where(
           followUpBaseWhere +
-            " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL AND ((a.ai_context #>> '{followUpState,firstSentAt}')::timestamp) < :twelveHoursAgo",
+            " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL",
           {
             ...followUpParams,
-            twelveHoursAgo,
           }
         )
         .getCount();
 
+      // Aguardando: 2º enviado e (now - secondSentAt) < moveToFechadosMinutes (ainda não fechou)
       counts['inativo-24h'] = await attendanceRepo
         .createQueryBuilder('a')
         .where(
           followUpBaseWhere +
-            " AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NOT NULL AND a.last_client_message_at >= :thirtySixHoursAgo",
+            " AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') >= :minSecondSentAt",
           {
             ...followUpParams,
-            thirtySixHoursAgo,
+            minSecondSentAt,
           }
         )
         .getCount();
@@ -1785,14 +1924,10 @@ export class AttendanceController {
   }
 
   /**
-   * Get supervisor dashboard statistics with optional filters.
-   * Query:
-   * - from: ISO date or YYYY-MM-DD (inclusive start)
-   * - to: ISO date or YYYY-MM-DD (inclusive end)
-   * - selectedDay: YYYY-MM-DD for "atendimentos hoje/no dia"
-   * - brand: optional VehicleBrand
+   * Get follow-up attendances for supervisor by node.
+   * Query ?node=follow-up|inativo-1h|inativo-12h|inativo-24h
    */
-  private async getSupervisorStats(req: Request, res: Response): Promise<void> {
+  private async getFollowUpAttendances(req: Request, res: Response): Promise<void> {
     try {
       const supervisorId = (req as any).user?.sub;
       if (!supervisorId) {
@@ -1806,6 +1941,172 @@ export class AttendanceController {
         res.status(403).json({ error: 'User not a supervisor' });
         return;
       }
+
+      const node = String(req.query.node || 'follow-up') as 'follow-up' | 'inativo-1h' | 'inativo-12h' | 'inativo-24h';
+      const attendanceRepo = AppDataSource.getRepository(Attendance);
+      const messageRepo = AppDataSource.getRepository(Message);
+      const messageReadRepo = AppDataSource.getRepository(MessageRead);
+
+      const movementConfig = await aiConfigService.getFollowUpMovementConfig();
+      const moveOpenToFirstCutoff = new Date(Date.now() - movementConfig.moveOpenToFirstFollowUpMinutes * 60 * 1000);
+      const minSecondSentAt = new Date(
+        Date.now() - movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000
+      ).toISOString();
+
+      const followUpBaseWhere =
+        "a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at)";
+      const params: Record<string, any> = {
+        fin: false,
+        followUpStates: [
+          OperationalState.TRIAGEM,
+          OperationalState.ABERTO,
+          OperationalState.EM_ATENDIMENTO,
+          OperationalState.AGUARDANDO_CLIENTE,
+        ],
+        supervisorId,
+        aiOrigin: MessageOrigin.AI,
+        sellerOrigin: MessageOrigin.SELLER,
+      };
+
+      let nodeWhere = '';
+      if (node === 'inativo-1h') {
+        nodeWhere =
+          " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NULL AND a.last_client_message_at < :moveOpenToFirstCutoff";
+        params.moveOpenToFirstCutoff = moveOpenToFirstCutoff;
+      } else if (node === 'inativo-12h') {
+        nodeWhere =
+          " AND (a.ai_context #>> '{followUpState,firstSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NULL";
+      } else if (node === 'inativo-24h') {
+        nodeWhere =
+          " AND (a.ai_context #>> '{followUpState,secondSentAt}') IS NOT NULL AND (a.ai_context #>> '{followUpState,secondSentAt}') >= :minSecondSentAt";
+        params.minSecondSentAt = minSecondSentAt;
+      }
+
+      let attendances = await attendanceRepo
+        .createQueryBuilder('a')
+        .where(followUpBaseWhere + nodeWhere, params)
+        .orderBy('a.updated_at', 'DESC')
+        .getMany();
+      attendances = await filterBlacklistedAttendances(attendances);
+
+      const conversations = await Promise.all(
+        attendances.map(async (attendance) => {
+          const lastMessage = await messageRepo.findOne({
+            where: { attendanceId: attendance.id },
+            order: { sentAt: 'DESC' },
+          });
+
+          const messageRead = await messageReadRepo.findOne({
+            where: {
+              attendanceId: attendance.id,
+              userId: (req as any).user?.sub as UUID,
+            },
+          });
+
+          let unreadCount = 0;
+          if (messageRead) {
+            const unreadMessages = await messageRepo.find({
+              where: { attendanceId: attendance.id, origin: MessageOrigin.CLIENT },
+            });
+            unreadCount = unreadMessages.filter(
+              (msg) => new Date(msg.sentAt) > new Date(messageRead.lastReadAt)
+            ).length;
+          } else {
+            unreadCount = await messageRepo.count({
+              where: { attendanceId: attendance.id, origin: MessageOrigin.CLIENT },
+            });
+          }
+
+          let clientName = attendance.clientPhone?.split('@')[0] ?? 'N/A';
+          if (!lastMessage?.metadata?.pushName) {
+            const clientMessages = await messageRepo.find({
+              where: { attendanceId: attendance.id, origin: MessageOrigin.CLIENT },
+              order: { sentAt: 'DESC' },
+              take: 10,
+            });
+            for (const msg of clientMessages) {
+              if (msg.metadata?.pushName) {
+                clientName = msg.metadata.pushName;
+                break;
+              }
+            }
+          } else {
+            clientName = lastMessage.metadata.pushName;
+          }
+
+          const followUpState = (attendance.aiContext?.followUpState ?? {}) as {
+            firstSentAt?: string;
+            secondSentAt?: string;
+          };
+          let followUpPhase: string;
+          if (!followUpState.firstSentAt) {
+            followUpPhase = 'Aguardando 1º Follow up';
+          } else if (!followUpState.secondSentAt) {
+            followUpPhase = 'Aguardando 2º Follow up';
+          } else {
+            followUpPhase = 'Aguardando';
+          }
+
+          return {
+            id: attendance.id,
+            clientPhone: attendance.clientPhone,
+            clientName,
+            lastMessage: lastMessage?.content || '',
+            lastMessageTime: lastMessage?.sentAt || attendance.updatedAt,
+            lastMessageMediaType: lastMessage?.metadata?.mediaType,
+            unread: unreadCount,
+            state: attendance.state,
+            handledBy: attendance.handledBy,
+            vehicleBrand: attendance.vehicleBrand,
+            createdAt: attendance.createdAt.toISOString(),
+            updatedAt: attendance.updatedAt.toISOString(),
+            followUpPhase,
+          };
+        })
+      );
+
+      res.json({ success: true, conversations });
+    } catch (error: any) {
+      logger.error('Error getting follow-up attendances', {
+        error: error.message,
+        supervisorId: (req as any).user?.sub,
+      });
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /**
+   * Get supervisor dashboard statistics with optional filters.
+   * Query:
+   * - from: ISO date or YYYY-MM-DD (inclusive start)
+   * - to: ISO date or YYYY-MM-DD (inclusive end)
+   * - selectedDay: YYYY-MM-DD for "atendimentos hoje/no dia"
+   * - brand: optional VehicleBrand
+   */
+  private async getSupervisorStats(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = (req as any).user?.sub;
+      if (!userId) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      const userRepo = AppDataSource.getRepository(User);
+      const user = await userRepo.findOne({ where: { id: userId as UUID } });
+      if (!user) {
+        res.status(403).json({ error: 'User not found' });
+        return;
+      }
+
+      const role = user.role;
+      const isSupervisor = role === UserRole.SUPERVISOR;
+      const isAdminOrSuperAdmin = role === UserRole.ADMIN_GENERAL || role === UserRole.SUPER_ADMIN;
+      if (!isSupervisor && !isAdminOrSuperAdmin) {
+        res.status(403).json({ error: 'Acesso restrito a supervisores e administradores' });
+        return;
+      }
+
+      const supervisorId = isSupervisor ? userId : null;
 
       const parseDate = (value: unknown): Date | null => {
         if (typeof value !== 'string' || !value.trim()) return null;
@@ -1843,14 +2144,15 @@ export class AttendanceController {
         : null;
 
       const attendanceRepo = AppDataSource.getRepository(Attendance);
-      // Inclui: atribuídos ao supervisor, atribuídos a vendedores do supervisor, OU não atribuídos (AI)
-      const visibilityWhere =
-        '(a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId) OR a.seller_id IS NULL)';
+      // Supervisor: atribuídos ao supervisor, vendedores do supervisor, ou não atribuídos (AI)
+      // Admin/SuperAdmin: todos os atendimentos
+      const visibilityWhere = supervisorId
+        ? '(a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId) OR a.seller_id IS NULL)'
+        : '1=1';
+      const visibilityParams = supervisorId ? { supervisorId } : {};
 
       const makeBaseQuery = () => {
-        const qb = attendanceRepo
-          .createQueryBuilder('a')
-          .where(visibilityWhere, { supervisorId });
+        const qb = attendanceRepo.createQueryBuilder('a').where(visibilityWhere, visibilityParams);
         if (brandFilter) {
           qb.andWhere('a.vehicle_brand = :brand', { brand: brandFilter });
         }
@@ -1859,7 +2161,7 @@ export class AttendanceController {
 
       const totalAttendances = await attendanceRepo
         .createQueryBuilder('a')
-        .where(visibilityWhere, { supervisorId })
+        .where(visibilityWhere, visibilityParams)
         .getCount();
 
       const filteredAttendances = await makeBaseQuery()
@@ -1948,7 +2250,7 @@ export class AttendanceController {
     } catch (error: any) {
       logger.error('Error getting supervisor stats', {
         error: error.message,
-        supervisorId: (req as any).user?.sub,
+        userId: (req as any).user?.sub,
         query: req.query,
       });
       res.status(500).json({ error: error.message });
@@ -2161,17 +2463,29 @@ export class AttendanceController {
         };
       }));
 
+      // lastMessageTime: use last message only on initial load (offset 0); on load-more, omit to avoid overwriting with older msg
+      const lastMsg = offset === 0 && messages.length > 0 ? messages[messages.length - 1] : null;
+      const lastMessageTimeRaw = lastMsg?.sentAt ?? attendance.updatedAt;
+      const lastMessageTime = lastMessageTimeRaw instanceof Date ? lastMessageTimeRaw.toISOString() : lastMessageTimeRaw;
+
+      const aiContext = (attendance.aiContext ?? {}) as Record<string, unknown>;
+      const clientNameFromContext =
+        typeof aiContext.clientName === 'string' && aiContext.clientName.trim() ? aiContext.clientName.trim() : null;
+      const clientNameFromPush = messages.find(m => m.origin === MessageOrigin.CLIENT)?.metadata?.pushName as string | undefined;
+      const resolvedClientName = clientNameFromContext || clientNameFromPush || attendance.clientPhone?.split('@')[0] || attendance.clientPhone;
+
       res.json({
         success: true,
         messages: formattedMessages,
         attendance: {
           id: attendance.id,
           clientPhone: attendance.clientPhone,
-          clientName: messages.find(m => m.origin === MessageOrigin.CLIENT)?.metadata?.pushName || attendance.clientPhone.split('@')[0],
+          clientName: resolvedClientName,
           state: attendance.state,
           handledBy: attendance.handledBy,
           interventionType: attendance.interventionType ?? undefined,
           interventionData: attendance.interventionData ?? undefined,
+          ...(offset === 0 && { lastMessageTime, createdAt: attendance.createdAt instanceof Date ? attendance.createdAt.toISOString() : (attendance.createdAt as string | undefined) }),
         },
         pagination: {
           total: totalCount,
@@ -2351,6 +2665,11 @@ export class AttendanceController {
 
       // Update attendance's updatedAt
       attendance.updatedAt = new Date();
+      const wasAwaitingFirstMsg = attendance.operationalState === OperationalState.AGUARDANDO_PRIMEIRA_MSG;
+      // Após envio humano, o atendimento fica aguardando retorno do cliente.
+      // Isso habilita corretamente o fluxo de follow-up por inatividade.
+      // Se vinha de AGUARDANDO_PRIMEIRA_MSG (Chamar sem 1ª msg), agora entra nas subdivisões (Abertos).
+      attendance.operationalState = OperationalState.AGUARDANDO_CLIENTE;
       
       // Reset inactivity timer if attendance is handled by HUMAN
       // This resets the 1-hour timer when human sends a message
@@ -2363,6 +2682,11 @@ export class AttendanceController {
       }
       
       await attendanceRepo.save(attendance);
+
+      if (wasAwaitingFirstMsg) {
+        invalidateSubdivisionCountsCache();
+        socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+      }
 
       logger.info('Message created with PENDING status', {
         messageId: message.id,
@@ -2752,8 +3076,8 @@ export class AttendanceController {
         });
       }
 
+      // Não emitir subdivision_counts_changed: assume só altera handledBy, não move entre subdivisões nem altera contadores
       invalidateSubdivisionCountsCache();
-      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
       res.json({ 
         success: true, 
@@ -2992,8 +3316,8 @@ export class AttendanceController {
         });
       }
 
+      // Não emitir subdivision_counts_changed: devolver só altera handledBy, não move entre subdivisões nem altera contadores
       invalidateSubdivisionCountsCache();
-      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
 
       res.json({ 
         success: true, 

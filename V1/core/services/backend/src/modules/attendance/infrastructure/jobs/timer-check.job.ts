@@ -57,6 +57,8 @@ export class TimerCheckJob {
    */
   private async run(): Promise<void> {
     try {
+      // Check and send follow-up for inactive attendances (runs every 1 minute)
+      const followUpsSent = await this.inactivityService.checkAndCloseInactiveAttendances();
       // Check and close balcão attendances with expired FC timer
       const closedByBalcaoTimer = await this.inactivityService.checkAndCloseBalcaoByTimer();
       // Check and close e-commerce attendances with expired timer
@@ -64,8 +66,9 @@ export class TimerCheckJob {
       // Check and close attendances by subdivision inactivity (configurable per subdivision)
       const closedBySubdivisionInactivity = await this.inactivityService.checkAndCloseBySubdivisionInactivity();
       
-      if (closedByBalcaoTimer > 0 || closedByEcommerceTimer > 0 || closedBySubdivisionInactivity > 0) {
+      if (followUpsSent > 0 || closedByBalcaoTimer > 0 || closedByEcommerceTimer > 0 || closedBySubdivisionInactivity > 0) {
         logger.info('Timer check job completed', { 
+          followUpsSent,
           closedByBalcaoTimer,
           closedByEcommerceTimer,
           closedBySubdivisionInactivity,

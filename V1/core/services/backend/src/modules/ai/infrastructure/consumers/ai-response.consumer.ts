@@ -213,6 +213,19 @@ export class AIResponseConsumer {
         }
       }
 
+      // Após resposta da IA, o atendimento deve ficar aguardando retorno do cliente.
+      // Sem isso, o job de follow-up não processa o atendimento.
+      if (attendance.operationalState !== OperationalState.AGUARDANDO_CLIENTE) {
+        await attendanceRepo.update(
+          { id: attendance.id },
+          {
+            operationalState: OperationalState.AGUARDANDO_CLIENTE,
+            updatedAt: new Date(),
+          }
+        );
+        attendance.operationalState = OperationalState.AGUARDANDO_CLIENTE;
+      }
+
       const messageRepo = AppDataSource.getRepository(Message);
       
       // Get last message to check if sender changed (for AI name display logic)

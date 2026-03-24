@@ -10,6 +10,8 @@ export class RabbitMQQueue implements IQueue {
   private connection: AmqpConnection | null = null;
   private channel: AmqpChannel | null = null;
   private isConnecting = false;
+  private readonly connectionWaitTimeoutMs = 15000;
+  private readonly connectionPollIntervalMs = 100;
 
   constructor() {
     this.connect();
@@ -67,17 +69,45 @@ export class RabbitMQQueue implements IQueue {
   }
 
   private async ensureConnection(): Promise<void> {
-    if (!this.connection || !this.channel) {
-      await this.connect();
-    }
-    
-    // Verify connection is still alive (amqplib Connection may have underlying socket)
-    const conn = this.connection as { connection?: { destroyed?: boolean } } | null;
-    if (conn?.connection?.destroyed) {
+    // Fast path when connection/channel already exist and are healthy.
+    if (this.connection && this.channel) {
+      const conn = this.connection as { connection?: { destroyed?: boolean } } | null;
+      if (!conn?.connection?.destroyed) {
+        return;
+      }
       logger.warn('RabbitMQ connection was destroyed, reconnecting...');
       this.connection = null;
       this.channel = null;
+    }
+
+    // Trigger connect if nothing is in flight.
+    if (!this.isConnecting) {
       await this.connect();
+    }
+
+    // Wait for in-flight connection attempts to complete.
+    const startedAt = Date.now();
+    while ((!this.connection || !this.channel || this.isConnecting) && Date.now() - startedAt < this.connectionWaitTimeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, this.connectionPollIntervalMs));
+      if (!this.connection && !this.isConnecting) {
+        await this.connect();
+      }
+    }
+
+    if (!this.connection || !this.channel) {
+      throw new Error('RabbitMQ connection/channel not ready after waiting');
+    }
+
+    // Verify connection is still alive after wait.
+    const conn = this.connection as { connection?: { destroyed?: boolean } } | null;
+    if (conn?.connection?.destroyed) {
+      logger.warn('RabbitMQ connection became destroyed after wait, reconnecting...');
+      this.connection = null;
+      this.channel = null;
+      await this.connect();
+      if (!this.connection || !this.channel) {
+        throw new Error('RabbitMQ connection/channel unavailable after reconnect');
+      }
     }
   }
 

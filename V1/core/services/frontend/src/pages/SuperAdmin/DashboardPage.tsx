@@ -4,7 +4,7 @@ import { useAuthStore } from '../../store/auth.store';
 import toast from 'react-hot-toast';
 import { whatsappService, WhatsAppNumberListItem } from '../../services/whatsapp.service';
 import { userService, User } from '../../services/user.service';
-import { aiConfigService, PendingFunctionConfig, functionCallConfigService, FunctionCallConfig } from '../../services/ai-config.service';
+import { aiConfigService, PendingFunctionConfig, functionCallConfigService, FunctionCallConfig, FollowUpConfig, FollowUpMovementConfig } from '../../services/ai-config.service';
 import { v4 as uuidv4 } from 'uuid';
 import { BufferConfigTab } from '../../components/SuperAdmin/BufferConfigTab';
 import { TemperatureConfigTab } from '../../components/SuperAdmin/TemperatureConfigTab';
@@ -12,6 +12,8 @@ import { MultiAgentTab } from '../../components/SuperAdmin/MultiAgentTab';
 import { WorkflowTab } from '../../components/SuperAdmin/WorkflowTab';
 import { CostsTab } from '../../components/SuperAdmin/CostsTab';
 import { SubdivisionInactivityTimeouts } from '../../components/SuperAdmin/SubdivisionInactivityTimeouts';
+import { FollowUpConfigTab } from '../../components/SuperAdmin/FollowUpConfigTab';
+import { FollowUpMovementConfigTab } from '../../components/SuperAdmin/FollowUpMovementConfigTab';
 import { AutoReopenTimeout } from '../../components/SuperAdmin/AutoReopenTimeout';
 import { ImageDescriptionPrompt } from '../../components/SuperAdmin/ImageDescriptionPrompt';
 import { BibliotecaDashboard, type BibliotecaSchema } from '../../components/SuperAdmin/BibliotecaDashboard';
@@ -502,6 +504,25 @@ export const SuperAdminDashboard: React.FC = () => {
   const [subdivisionInactivityTimeouts, setSubdivisionInactivityTimeouts] = useState<Record<string, number>>({});
   const [isLoadingSubdivisionTimeouts, setIsLoadingSubdivisionTimeouts] = useState(false);
   const [isSavingSubdivisionTimeouts, setIsSavingSubdivisionTimeouts] = useState(false);
+
+  // Follow-up config states (tempos e mensagens de follow-up por inatividade)
+  const [followUpConfig, setFollowUpConfig] = useState<FollowUpConfig>({
+    firstDelayMinutes: 60,
+    secondDelayMinutes: 1440,
+    closeDelayMinutes: 2160,
+    firstMessage: '',
+    secondMessage: '',
+  });
+  const [isLoadingFollowUp, setIsLoadingFollowUp] = useState(false);
+  const [isSavingFollowUp, setIsSavingFollowUp] = useState(false);
+
+  // Follow-up movement config (movimentação entre divisões)
+  const [followUpMovementConfig, setFollowUpMovementConfig] = useState<FollowUpMovementConfig>({
+    moveOpenToFirstFollowUpMinutes: 60,
+    moveToFechadosAfterSecondFollowUpMinutes: 1440,
+  });
+  const [isLoadingFollowUpMovement, setIsLoadingFollowUpMovement] = useState(false);
+  const [isSavingFollowUpMovement, setIsSavingFollowUpMovement] = useState(false);
 
   // Temperature Config states
   const [temperature, setTemperature] = useState<number>(0.7);
@@ -1293,8 +1314,34 @@ export const SuperAdminDashboard: React.FC = () => {
           setIsLoadingAutoReopen(false);
         }
       };
+      const loadFollowUpConfig = async () => {
+        setIsLoadingFollowUp(true);
+        try {
+          const config = await aiConfigService.getFollowUpConfig();
+          setFollowUpConfig(config);
+        } catch (error: any) {
+          console.error('Error loading follow-up config:', error);
+          toast.error('Erro ao carregar configuração de follow-up');
+        } finally {
+          setIsLoadingFollowUp(false);
+        }
+      };
+      const loadFollowUpMovementConfig = async () => {
+        setIsLoadingFollowUpMovement(true);
+        try {
+          const config = await aiConfigService.getFollowUpMovementConfig();
+          setFollowUpMovementConfig(config);
+        } catch (error: any) {
+          console.error('Error loading follow-up movement config:', error);
+          toast.error('Erro ao carregar configuração de movimentação');
+        } finally {
+          setIsLoadingFollowUpMovement(false);
+        }
+      };
       loadSubdivisionInactivityTimeouts();
       loadAutoReopenConfig();
+      loadFollowUpConfig();
+      loadFollowUpMovementConfig();
     }
   }, [aiConfigMode, activeMenu]);
 
@@ -1558,6 +1605,40 @@ export const SuperAdminDashboard: React.FC = () => {
       toast.error(error.response?.data?.error || 'Erro ao atualizar tempos de inatividade por subdivisão');
     } finally {
       setIsSavingSubdivisionTimeouts(false);
+    }
+  };
+
+  const handleSaveFollowUpConfig = async () => {
+    if (!followUpConfig.firstMessage?.trim()) {
+      toast.error('A mensagem do 1º follow-up é obrigatória');
+      return;
+    }
+    if (!followUpConfig.secondMessage?.trim()) {
+      toast.error('A mensagem do 2º follow-up é obrigatória');
+      return;
+    }
+    setIsSavingFollowUp(true);
+    try {
+      await aiConfigService.updateFollowUpConfig(followUpConfig);
+      toast.success('Configuração de follow-up atualizada com sucesso');
+    } catch (error: any) {
+      console.error('Error saving follow-up config:', error);
+      toast.error(error.response?.data?.error || 'Erro ao atualizar configuração de follow-up');
+    } finally {
+      setIsSavingFollowUp(false);
+    }
+  };
+
+  const handleSaveFollowUpMovementConfig = async () => {
+    setIsSavingFollowUpMovement(true);
+    try {
+      await aiConfigService.updateFollowUpMovementConfig(followUpMovementConfig);
+      toast.success('Configuração de movimentação atualizada com sucesso');
+    } catch (error: any) {
+      console.error('Error saving follow-up movement config:', error);
+      toast.error(error.response?.data?.error || 'Erro ao atualizar configuração de movimentação');
+    } finally {
+      setIsSavingFollowUpMovement(false);
     }
   };
 
@@ -4860,6 +4941,24 @@ export const SuperAdminDashboard: React.FC = () => {
                           onSaveSubdivisionTimeouts={handleSaveSubdivisionInactivityTimeouts}
                         />
                       </div>
+
+                      {/* Row 4: Follow-up Config (tempos e mensagens de follow-up por inatividade) */}
+                      <FollowUpConfigTab
+                        followUpConfig={followUpConfig}
+                        setFollowUpConfig={setFollowUpConfig}
+                        isLoading={isLoadingFollowUp}
+                        isSaving={isSavingFollowUp}
+                        onSave={handleSaveFollowUpConfig}
+                      />
+
+                      {/* Row 5: Follow-up Movement Config (movimentação entre divisões) */}
+                      <FollowUpMovementConfigTab
+                        config={followUpMovementConfig}
+                        setConfig={setFollowUpMovementConfig}
+                        isLoading={isLoadingFollowUpMovement}
+                        isSaving={isSavingFollowUpMovement}
+                        onSave={handleSaveFollowUpMovementConfig}
+                      />
                     </div>
                   </div>
                 )}

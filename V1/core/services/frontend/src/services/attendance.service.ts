@@ -33,6 +33,8 @@ export interface Conversation {
   unassignedSource?: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao';
   /** Subdivisão do vendedor (pedidos-orcamentos, perguntas-pos-orcamento, etc.) */
   sellerSubdivision?: string;
+  /** Fase do follow-up (Aguardando 1º Follow up, Aguardando 2º Follow up, Aguardando) */
+  followUpPhase?: string;
 }
 
 export interface ContactHistoryMessage {
@@ -163,6 +165,16 @@ export const attendanceService = {
   async getUnassignedAttendances(filter?: string): Promise<Conversation[]> {
     const qs = filter ? `?filter=${encodeURIComponent(filter)}` : '';
     const response = await api.get<GetConversationsBySellerResponse>(`/attendances/unassigned${qs}`);
+    return response.data.conversations;
+  },
+
+  /**
+   * Get follow-up attendances by follow-up node.
+   */
+  async getFollowUpAttendances(node: 'follow-up' | 'inativo-1h' | 'inativo-12h' | 'inativo-24h'): Promise<Conversation[]> {
+    const response = await api.get<GetConversationsBySellerResponse>(
+      `/attendances/supervisor/follow-up?node=${encodeURIComponent(node)}`
+    );
     return response.data.conversations;
   },
 

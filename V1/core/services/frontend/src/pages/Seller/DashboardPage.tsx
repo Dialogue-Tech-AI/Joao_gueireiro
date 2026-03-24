@@ -1689,8 +1689,8 @@ export const SellerDashboard: React.FC = () => {
 
   const handleSendAudioRecording = async (audioBlob: Blob) => {
     try {
-      // Convert blob to File
-      const audioFile = new File([audioBlob], `audio-${Date.now()}.webm`, { type: 'audio/webm' });
+      const ext = audioBlob.type.includes('mp4') || audioBlob.type.includes('m4a') ? 'm4a' : 'webm';
+      const audioFile = new File([audioBlob], `audio-${Date.now()}.${ext}`, { type: audioBlob.type });
       await handleSendMedia(audioFile);
       setShowAudioRecorder(false);
     } catch (error: any) {
@@ -3470,7 +3470,7 @@ export const SellerDashboard: React.FC = () => {
                 </p>
               )}
             </div>
-            <div className="p-6 space-y-4">
+            <div className="p-6 space-y-5">
               <div className="flex items-center justify-between text-xs">
                 <div className="flex items-center space-x-3 text-slate-500">
                   <div className="p-1.5 bg-green-50 dark:bg-green-900/20 rounded-md">
@@ -3506,24 +3506,6 @@ export const SellerDashboard: React.FC = () => {
                   {selectedConversationData?.handledBy === 'AI' ? 'IA' : 'Humano'}
                 </span>
               </div>
-              {selectedConversationData?.vehicleBrand && (
-                <div className="flex items-center justify-between text-xs">
-                  <div className="flex items-center space-x-3 text-slate-500">
-                    <div className="p-1.5 bg-purple-50 dark:bg-purple-900/20 rounded-md">
-                      <span className="material-icons-round text-purple-500 text-sm">directions_car</span>
-                    </div>
-                    <span className="font-medium">Marca:</span>
-                  </div>
-                  <span className="font-bold">
-                    {selectedConversationData.vehicleBrand === 'FORD' ? 'Ford' :
-                     selectedConversationData.vehicleBrand === 'GM' ? 'GM' :
-                     selectedConversationData.vehicleBrand === 'VW' ? 'Volkswagen' :
-                     selectedConversationData.vehicleBrand === 'FIAT' ? 'Fiat' :
-                     selectedConversationData.vehicleBrand === 'IMPORTADOS' ? 'Importados' :
-                     selectedConversationData.vehicleBrand}
-                  </span>
-                </div>
-              )}
               <div className="flex items-center justify-between text-xs">
                 <div className="flex items-center space-x-3 text-slate-500">
                   <div className="p-1.5 bg-purple-50 dark:bg-purple-900/20 rounded-md">

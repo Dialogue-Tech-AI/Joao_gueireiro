@@ -955,6 +955,167 @@ Responda em português brasileiro de forma clara e objetiva.`;
     }
   }
 
+  /**
+   * Get follow-up configuration (times and messages for inactive attendances)
+   */
+  async getFollowUpConfig(): Promise<{
+    firstDelayMinutes: number;
+    secondDelayMinutes: number;
+    closeDelayMinutes: number;
+    firstMessage: string;
+    secondMessage: string;
+  }> {
+    try {
+      const config = await this.configRepository.findOne({
+        where: { key: 'follow_up_config' },
+      });
+      if (!config || !config.value) {
+        return {
+          firstDelayMinutes: 60,
+          secondDelayMinutes: 1440,
+          closeDelayMinutes: 2160,
+          firstMessage: 'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.',
+          secondMessage: 'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.',
+        };
+      }
+      const parsed = typeof config.value === 'string' ? JSON.parse(config.value) : config.value;
+      return {
+        firstDelayMinutes: Math.max(1, Math.min(1440, parsed.firstDelayMinutes ?? 60)),
+        secondDelayMinutes: Math.max(1, Math.min(1440 * 7, parsed.secondDelayMinutes ?? 1440)),
+        closeDelayMinutes: Math.max(60, Math.min(1440 * 30, parsed.closeDelayMinutes ?? 2160)),
+        firstMessage: typeof parsed.firstMessage === 'string' ? parsed.firstMessage : 'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.',
+        secondMessage: typeof parsed.secondMessage === 'string' ? parsed.secondMessage : 'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.',
+      };
+    } catch (error: any) {
+      logger.error('Error getting follow-up config', { error: error.message });
+      return {
+        firstDelayMinutes: 60,
+        secondDelayMinutes: 1440,
+        closeDelayMinutes: 2160,
+        firstMessage: 'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.',
+        secondMessage: 'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.',
+      };
+    }
+  }
+
+  /**
+   * Update follow-up configuration
+   */
+  async updateFollowUpConfig(config: {
+    firstDelayMinutes: number;
+    secondDelayMinutes: number;
+    closeDelayMinutes: number;
+    firstMessage: string;
+    secondMessage: string;
+  }): Promise<{ success: boolean; updatedAt: Date }> {
+    try {
+      if (config.firstDelayMinutes < 1 || config.firstDelayMinutes > 1440) {
+        throw new Error('Tempo até 1ª mensagem deve estar entre 1 e 1440 minutos (24h)');
+      }
+      if (config.secondDelayMinutes < 1 || config.secondDelayMinutes > 1440 * 7) {
+        throw new Error('Tempo até 2ª mensagem deve estar entre 1 e 10080 minutos (7 dias)');
+      }
+      if (config.closeDelayMinutes < 60 || config.closeDelayMinutes > 1440 * 30) {
+        throw new Error('Tempo até fechamento deve estar entre 60 e 43200 minutos (30 dias)');
+      }
+      if (!config.firstMessage?.trim()) {
+        throw new Error('Mensagem do 1º follow-up é obrigatória');
+      }
+      if (!config.secondMessage?.trim()) {
+        throw new Error('Mensagem do 2º follow-up é obrigatória');
+      }
+      let entity = await this.configRepository.findOne({
+        where: { key: 'follow_up_config' },
+      });
+      const value = JSON.stringify(config);
+      if (!entity) {
+        entity = this.configRepository.create({
+          key: 'follow_up_config',
+          value,
+          metadata: { updatedAt: new Date().toISOString() },
+        });
+      } else {
+        entity.value = value;
+        entity.metadata = { ...(entity.metadata || {}), updatedAt: new Date().toISOString() };
+      }
+      const saved = await this.configRepository.save(entity);
+      logger.info('Follow-up config updated', { updatedAt: saved.updatedAt });
+      return { success: true, updatedAt: saved.updatedAt };
+    } catch (error: any) {
+      logger.error('Error updating follow-up config', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Get follow-up movement configuration (when to move attendances between divisions)
+   * Separate from message sending times - controls column/status movement only.
+   */
+  async getFollowUpMovementConfig(): Promise<{
+    moveOpenToFirstFollowUpMinutes: number;
+    moveToFechadosAfterSecondFollowUpMinutes: number;
+  }> {
+    try {
+      const config = await this.configRepository.findOne({
+        where: { key: 'follow_up_movement_config' },
+      });
+      if (!config || !config.value) {
+        return {
+          moveOpenToFirstFollowUpMinutes: 60,
+          moveToFechadosAfterSecondFollowUpMinutes: 1440,
+        };
+      }
+      const parsed = typeof config.value === 'string' ? JSON.parse(config.value) : config.value;
+      return {
+        moveOpenToFirstFollowUpMinutes: Math.max(1, Math.min(1440, parsed.moveOpenToFirstFollowUpMinutes ?? 60)),
+        moveToFechadosAfterSecondFollowUpMinutes: Math.max(60, Math.min(43200, parsed.moveToFechadosAfterSecondFollowUpMinutes ?? 1440)),
+      };
+    } catch (error: any) {
+      logger.error('Error getting follow-up movement config', { error: error.message });
+      return {
+        moveOpenToFirstFollowUpMinutes: 60,
+        moveToFechadosAfterSecondFollowUpMinutes: 1440,
+      };
+    }
+  }
+
+  /**
+   * Update follow-up movement configuration
+   */
+  async updateFollowUpMovementConfig(config: {
+    moveOpenToFirstFollowUpMinutes: number;
+    moveToFechadosAfterSecondFollowUpMinutes: number;
+  }): Promise<{ success: boolean; updatedAt: Date }> {
+    try {
+      if (config.moveOpenToFirstFollowUpMinutes < 1 || config.moveOpenToFirstFollowUpMinutes > 1440) {
+        throw new Error('Tempo para mover de Abertos → Aguardando 1º deve estar entre 1 e 1440 minutos');
+      }
+      if (config.moveToFechadosAfterSecondFollowUpMinutes < 60 || config.moveToFechadosAfterSecondFollowUpMinutes > 43200) {
+        throw new Error('Tempo após 2º follow-up para Fechados deve estar entre 60 e 43200 minutos');
+      }
+      let entity = await this.configRepository.findOne({
+        where: { key: 'follow_up_movement_config' },
+      });
+      const value = JSON.stringify(config);
+      if (!entity) {
+        entity = this.configRepository.create({
+          key: 'follow_up_movement_config',
+          value,
+          metadata: { updatedAt: new Date().toISOString() },
+        });
+      } else {
+        entity.value = value;
+        entity.metadata = { ...(entity.metadata || {}), updatedAt: new Date().toISOString() };
+      }
+      const saved = await this.configRepository.save(entity);
+      logger.info('Follow-up movement config updated', { updatedAt: saved.updatedAt });
+      return { success: true, updatedAt: saved.updatedAt };
+    } catch (error: any) {
+      logger.error('Error updating follow-up movement config', { error: error.message });
+      throw error;
+    }
+  }
+
   async updateAutoReopenTimeout(timeoutMinutes: number): Promise<{ timeoutMinutes: number; updatedAt: Date }> {
     try {
       const clamped = Math.max(1, Math.min(480, timeoutMinutes)); // Clamp between 1 and 480 minutes

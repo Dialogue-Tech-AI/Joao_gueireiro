@@ -69,6 +69,11 @@ export class MessageProcessorService {
           {
             clientPhone: whatsappMessage.phoneNumber,
             whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
+            operationalState: OperationalState.AGUARDANDO_PRIMEIRA_MSG,
+          },
+          {
+            clientPhone: whatsappMessage.phoneNumber,
+            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
             operationalState: OperationalState.TRIAGEM,
           },
           {
@@ -1003,6 +1008,7 @@ export class MessageProcessorService {
 
     const attendance = await attendanceRepo.findOne({
       where: [
+        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.AGUARDANDO_PRIMEIRA_MSG },
         { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.TRIAGEM },
         { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.ABERTO },
         { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.EM_ATENDIMENTO },

@@ -27,15 +27,20 @@ export class AttendanceInactivityService {
       const attendanceRepo = AppDataSource.getRepository(Attendance);
       const messageRepo = AppDataSource.getRepository(Message);
 
-      const oneHourAgo = new Date();
-      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-      const thirtySixHoursAgo = new Date();
-      thirtySixHoursAgo.setHours(thirtySixHoursAgo.getHours() - 36);
+      const followUpConfig = await aiConfigService.getFollowUpConfig();
+      const movementConfig = await aiConfigService.getFollowUpMovementConfig();
+      const firstCutoff = new Date(Date.now() - followUpConfig.firstDelayMinutes * 60 * 1000);
 
-      // Processar apenas atendimentos aguardando cliente e não fechados
+      // Processar atendimentos "abertos" do funil (inclui triagem/aberto/em_atendimento/aguardando_cliente)
+      // para permitir a movimentação correta entre as colunas de Follow-up.
       const pendingAttendances = await attendanceRepo.find({
         where: {
-          operationalState: OperationalState.AGUARDANDO_CLIENTE,
+          operationalState: In([
+            OperationalState.TRIAGEM,
+            OperationalState.ABERTO,
+            OperationalState.EM_ATENDIMENTO,
+            OperationalState.AGUARDANDO_CLIENTE,
+          ]),
           isFinalized: false,
         },
       });
@@ -58,14 +63,8 @@ export class AttendanceInactivityService {
           secondSentAt?: string;
         };
 
-        // Regra: follow-up não ativa quando houve function call e a última mensagem não foi do cliente.
-        const lastMessage = await messageRepo.findOne({
-          where: { attendanceId: attendance.id },
-          order: { sentAt: 'DESC' },
-        });
-        if (attendance.interventionType && lastMessage && lastMessage.origin !== MessageOrigin.CLIENT) {
-          continue;
-        }
+        // Regra: apenas demanda-telefone-fixo (manutenção) não tem follow-up. protese-capilar e outros-assuntos
+        // têm follow-up mesmo após function call. (demanda-telefone-fixo já foi excluído acima.)
 
         // Precisa ter mensagem do cliente como base para contagem de inatividade.
         const lastClientMessageAt = attendance.lastClientMessageAt ?? null;
@@ -105,19 +104,23 @@ export class AttendanceInactivityService {
           await attendanceRepo.save(attendance);
         }
 
-        // Fechamento automático aos 36h de inatividade para quem já recebeu 2º follow-up.
-        if (normalizedState.secondSentAt && lastClientMessageAt < thirtySixHoursAgo) {
-          await this.moveToFechados(attendance, 'followup_36h');
-          autoClosedCount++;
-          continue;
+        // Fechamento automático: tempo após 2º follow-up (movimentação para Fechados)
+        if (normalizedState.secondSentAt) {
+          const secondSentAt = new Date(normalizedState.secondSentAt);
+          const closeAfterMs = movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000;
+          if (Date.now() - secondSentAt.getTime() >= closeAfterMs) {
+            await this.moveToFechados(attendance, 'followup_auto_close');
+            autoClosedCount++;
+            continue;
+          }
         }
 
-        // 1º follow-up: 1 hora sem resposta do cliente
-        if (!normalizedState.firstSentAt && lastClientMessageAt < oneHourAgo) {
+        // 1º follow-up: tempo configurado sem resposta do cliente (envio da mensagem)
+        if (!normalizedState.firstSentAt && lastClientMessageAt < firstCutoff) {
           const sent = await this.sendFollowUpMessage(
             attendance,
             1,
-            'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.'
+            followUpConfig.firstMessage
           );
           if (sent) {
             followUpsSent++;
@@ -133,15 +136,15 @@ export class AttendanceInactivityService {
           continue;
         }
 
-        // 2º follow-up: 24 horas após o primeiro follow-up, sem resposta do cliente
+        // 2º follow-up: tempo configurado após o primeiro follow-up, sem resposta do cliente
         if (normalizedState.firstSentAt && !normalizedState.secondSentAt) {
           const firstSentAt = new Date(normalizedState.firstSentAt);
-          const secondCutoff = new Date(firstSentAt.getTime() + 24 * 60 * 60 * 1000);
+          const secondCutoff = new Date(firstSentAt.getTime() + followUpConfig.secondDelayMinutes * 60 * 1000);
           if (new Date() >= secondCutoff) {
             const sent = await this.sendFollowUpMessage(
               attendance,
               2,
-              'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.'
+              followUpConfig.secondMessage
             );
             if (sent) {
               followUpsSent++;

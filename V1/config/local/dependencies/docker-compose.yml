@@ -137,21 +137,27 @@ services:
       retries: 5
       start_period: 40s
 
-# Volumes for data persistence
+# Volumes for data persistence (com prefixo guerreiros- para evitar conflito com outros projetos)
 volumes:
   postgres_data:
+    name: guerreiros-postgres-data
     driver: local
   redis_data:
+    name: guerreiros-redis-data
     driver: local
   rabbitmq_data:
+    name: guerreiros-rabbitmq-data
     driver: local
   minio_data:
+    name: guerreiros-minio-data
     driver: local
   qdrant_data:
+    name: guerreiros-qdrant-data
     driver: local
 
-# Network for inter-service communication
+# Network for inter-service communication (evita conflito com outros projetos)
 networks:
   guerreiros-network:
+    name: guerreiros-network
     driver: bridge
 

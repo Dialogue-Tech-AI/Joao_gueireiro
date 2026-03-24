@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, startTransition } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, startTransition } from 'react';
 import { useAuthStore } from '../../store/auth.store';
 import { MediaPlayer } from '../../components/Chat/MediaPlayer';
 import { MediaUpload } from '../../components/Chat/MediaUpload';
@@ -12,6 +12,7 @@ import { useNotifications } from '../../contexts/NotificationContext';
 import { quoteService, type QuoteRequest } from '../../services/quote.service';
 import { mediaService } from '../../services/media.service';
 import toast from 'react-hot-toast';
+import { contactsService, type Contact, type WhatsAppNumberInfo } from '../../services/contacts.service';
 
 type VehicleBrand = 'FORD' | 'GM' | 'VW' | 'FIAT' | 'IMPORTADOS';
 
@@ -31,9 +32,9 @@ const CATEGORY_TO_BRANDS: Record<ServiceCategory, VehicleBrand[]> = {
 };
 const FOLLOW_UP_LABELS: Record<FollowUpNode, string> = {
   'follow-up': 'Follow UP',
-  'inativo-1h': 'Inativo > 1h',
-  'inativo-12h': 'Inativo +12h',
-  'inativo-24h': 'Inativo 24+h',
+  'inativo-1h': 'Aguardando 1º Follow up',
+  'inativo-12h': 'Aguardando 2º Follow up',
+  'inativo-24h': 'Aguardando',
 };
 /** Mapeamento serviço -> interventionType (quando filtro Intervenção humana está ativo) */
 const SERVICE_TO_INTERVENTION: Record<ServiceCategory, string | string[]> = {
@@ -101,7 +102,16 @@ const getCategoryLabelForBrand = (brand: VehicleBrand): string => {
   }
   return String(brand);
 };
-type SupervisorTab = 'chat' | 'estatisticas';
+type SupervisorTab = 'chat' | 'estatisticas' | 'contatos';
+const SUPERVISOR_TAB_ORDER: SupervisorTab[] = ['chat', 'estatisticas', 'contatos'];
+/** Retorna classes de translate (GPU: translate3d): mobile X, desktop Y. Usa classes CSS otimizadas para transição fluida. */
+function getSupervisorTabSlideClass(panelTab: SupervisorTab, activeTab: SupervisorTab): string {
+  const pi = SUPERVISOR_TAB_ORDER.indexOf(panelTab);
+  const ai = SUPERVISOR_TAB_ORDER.indexOf(activeTab);
+  if (pi === ai) return 'supervisor-tab-mobile-center supervisor-tab-desktop-center';
+  if (pi < ai) return 'supervisor-tab-mobile-left supervisor-tab-desktop-up';
+  return 'supervisor-tab-mobile-right supervisor-tab-desktop-down';
+}
 type StatsPeriod = 'dia' | 'semana' | 'mes';
 
 interface SupervisorStatsState {
@@ -155,8 +165,32 @@ export const SupervisorDashboard: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [activeSupervisorTab, setActiveSupervisorTab] = useState<SupervisorTab>('chat');
+  const [hasUserSwitchedTabs, setHasUserSwitchedTabs] = useState(false);
+  const [contactsList, setContactsList] = useState<Contact[]>([]);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [contactsSearch, setContactsSearch] = useState('');
+  const [contactsSortOrder, setContactsSortOrder] = useState<'recent' | 'alphabetical'>('recent');
+  const [contactsSortDropdownOpen, setContactsSortDropdownOpen] = useState(false);
+  const contactsSortDropdownRef = useRef<HTMLDivElement>(null);
+  const [baileysNumbers, setBaileysNumbers] = useState<WhatsAppNumberInfo[]>([]);
+  const [mobileChatLayer, setMobileChatLayer] = useState<'entry' | 'conversations' | 'chat'>('entry');
+  const [mobileCustomerInfoOpen, setMobileCustomerInfoOpen] = useState(false);
+  useEffect(() => { if (activeSupervisorTab === 'chat') setMobileChatLayer('entry'); }, [activeSupervisorTab]);
+
+  const handleSupervisorTabChange = useCallback((tab: SupervisorTab) => {
+    if (tab !== activeSupervisorTab) setHasUserSwitchedTabs(true);
+    setActiveSupervisorTab(tab);
+  }, [activeSupervisorTab]);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importSelectedNumber, setImportSelectedNumber] = useState('');
+  const [importLoading, setImportLoading] = useState(false);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+  const [contactsBulkSelectMode, setContactsBulkSelectMode] = useState(false);
+  const [selectedContactsForBulk, setSelectedContactsForBulk] = useState<Set<string>>(new Set());
+  const [isDeletingContactsBulk, setIsDeletingContactsBulk] = useState(false);
   const [customerSidebarOpen, setCustomerSidebarOpen] = useState(true);
-  const [selectedAttendanceFilter, setSelectedAttendanceFilter] = useState<string>('tudo');
+  const [selectedAttendanceFilter, setSelectedAttendanceFilter] = useState<string>('abertos');
   /** true = view "Intervenção humana" (todas intervenções com badge por serviço); false = view de serviços (vendedores) */
   const [viewingIntervencaoHumana, setViewingIntervencaoHumana] = useState<boolean>(false);
   const [selectedNaoAtribuidosFilter, setSelectedNaoAtribuidosFilter] = useState<'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao'>('todos');
@@ -225,6 +259,10 @@ export const SupervisorDashboard: React.FC = () => {
   const [activeCountBySubdivision, setActiveCountBySubdivision] = useState<Record<string, number>>({});
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [selectedConversationData, setSelectedConversationData] = useState<Conversation | null>(null);
+  /** Sidebar details prontos: evita exibir "Humano" antes do dado real (piscar). Opacity 0→1 quando loadMessages conclui. */
+  const [sidebarDetailsReady, setSidebarDetailsReady] = useState(false);
+  /** Chat ao vivo: fade-in suave ao carregar mensagens (evita piscar). */
+  const [chatMessagesFadeIn, setChatMessagesFadeIn] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
   const getConversationSortTimestamp = (c: Conversation): number => {
@@ -542,6 +580,116 @@ export const SupervisorDashboard: React.FC = () => {
     };
   }, [activeSupervisorTab, statsWeekRange]);
 
+  useEffect(() => {
+    if (activeSupervisorTab !== 'contatos') return;
+    let cancelled = false;
+    const loadContacts = async () => {
+      try {
+        setContactsLoading(true);
+        const [contacts, numbers] = await Promise.all([
+          contactsService.listContacts(),
+          contactsService.listWhatsAppNumbers(),
+        ]);
+        if (!cancelled) {
+          setContactsList(contacts);
+          setBaileysNumbers(numbers);
+        }
+      } catch (error: any) {
+        if (!cancelled) {
+          console.error('Error loading contacts:', error);
+          const msg = error?.response?.data?.error || error?.message || 'Sem conexão com o servidor';
+          toast.error(`Erro ao carregar contatos: ${typeof msg === 'string' ? msg : 'Tente novamente'}`);
+        }
+      } finally {
+        if (!cancelled) setContactsLoading(false);
+      }
+    };
+    loadContacts();
+    return () => { cancelled = true; };
+  }, [activeSupervisorTab]);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (contactsSortDropdownRef.current && !contactsSortDropdownRef.current.contains(e.target as Node)) {
+        setContactsSortDropdownOpen(false);
+      }
+    };
+    if (contactsSortDropdownOpen) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [contactsSortDropdownOpen]);
+
+  const filteredContacts = useMemo(() => {
+    let list = contactsList;
+    if (contactsSearch.trim()) {
+      const q = contactsSearch.toLowerCase();
+      list = list.filter(
+        (c) => c.clientPhone.includes(q) || (c.clientName && c.clientName.toLowerCase().includes(q))
+      );
+    }
+    const sorted = [...list];
+    if (contactsSortOrder === 'recent') {
+      sorted.sort((a, b) => new Date(b.lastContactAt).getTime() - new Date(a.lastContactAt).getTime());
+    } else {
+      sorted.sort((a, b) => {
+        const nameA = (a.clientName || a.clientPhone || '').toLowerCase().trim();
+        const nameB = (b.clientName || b.clientPhone || '').toLowerCase().trim();
+        return nameA.localeCompare(nameB, 'pt-BR');
+      });
+    }
+    return sorted;
+  }, [contactsList, contactsSearch, contactsSortOrder]);
+
+  const handleImportContacts = async () => {
+    if (!importFile || !importSelectedNumber) {
+      toast.error('Selecione o arquivo CSV e o número WhatsApp');
+      return;
+    }
+    if (!importFile.name.toLowerCase().endsWith('.csv')) {
+      toast.error('O arquivo deve ser CSV');
+      return;
+    }
+    try {
+      setImportLoading(true);
+      const result = await contactsService.importContacts(importFile, importSelectedNumber);
+      toast.success(result.message);
+      setShowImportModal(false);
+      setImportFile(null);
+      setImportSelectedNumber('');
+      if (importFileInputRef.current) importFileInputRef.current.value = '';
+      if (result.imported > 0 && activeSupervisorTab === 'contatos') {
+        const contacts = await contactsService.listContacts();
+        setContactsList(contacts);
+      }
+    } catch (error: any) {
+      toast.error(error?.response?.data?.error || 'Erro ao importar');
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const pendingChamarConversationRef = useRef<{ id: string } & Record<string, unknown> | null>(null);
+
+  const handleInitiateConversation = async (clientPhone: string) => {
+    if (baileysNumbers.length === 0) {
+      toast.error('Nenhum número Baileys disponível');
+      return;
+    }
+    try {
+      const connectedNumber = baileysNumbers.find((n) => n.connectionStatus === 'CONNECTED') || baileysNumbers[0];
+      const result = await contactsService.initiateConversation(clientPhone, connectedNumber.id);
+      toast.success(result.isNew ? 'Atendimento iniciado!' : 'Atendimento em aberto encontrado.');
+      const newConv = { ...(result.conversation as Conversation), id: result.attendanceId };
+      if (result.isNew) pendingChamarConversationRef.current = newConv;
+      handleSupervisorTabChange('chat');
+      setSelectedAttendanceFilter('abertos');
+      setSelectedConversation(result.attendanceId);
+      setSelectedConversationData(result.conversation as Conversation);
+      setSidebarDetailsReady(true);
+    } catch (error: any) {
+      toast.error(error?.response?.data?.error || 'Erro ao iniciar conversa');
+    }
+  };
+
   const maintenanceBookings = useMemo(() => {
     // Nova fonte oficial: interventionType. Mantém fallback por marca.
     const fromIntervention = supervisorStats.byIntervention?.['demanda-telefone-fixo'] ?? 0;
@@ -603,21 +751,21 @@ export const SupervisorDashboard: React.FC = () => {
       return 'conic-gradient(#e2e8f0 0% 100%)';
     }
 
-    let current = 0;
     const parts: string[] = [];
+    let pos = 0;
     for (const slice of slices) {
       if (slice.value <= 0) continue;
-      const start = current;
-      const normalized = (slice.value / total) * 100;
-      current = Math.min(100, current + normalized);
-      parts.push(`${slice.color} ${start.toFixed(2)}% ${current.toFixed(2)}%`);
+      const start = pos;
+      const share = (slice.value / total) * 100;
+      pos = Math.min(100, pos + share);
+      const end = pos;
+      parts.push(`${slice.color} ${start.toFixed(4)}% ${end.toFixed(4)}%`);
+    }
+    if (pos < 100) {
+      parts.push(`#e2e8f0 ${pos.toFixed(4)}% 100%`);
     }
 
-    if (current < 100) {
-      parts.push(`#e2e8f0 ${current.toFixed(2)}% 100%`);
-    }
-
-    return `conic-gradient(${parts.join(', ')})`;
+    return `conic-gradient(from 0deg, ${parts.join(', ')})`;
   }, [protesePercentValue, manutencaoPercentValue, outrosPercentValue, unclassifiedPercentValue]);
 
   const isSellerCurrentlyUnavailable = useCallback((seller: Seller) => {
@@ -648,7 +796,11 @@ export const SupervisorDashboard: React.FC = () => {
   /** Por attendanceId: lista de { divisionKey, subdivisionKey } para decrementar ao abrir */
   const redPendingByAttendanceRef = useRef<Record<string, { divisionKey: string; subdivisionKey: string }[]>>({});
   const entryNavRef = useRef<HTMLElement | null>(null);
+  const entryNavInnerRef = useRef<HTMLDivElement | null>(null);
+  const [slidingIndicatorRect, setSlidingIndicatorRect] = useState<{ top: number; height: number; left: number; width: number } | null>(null);
   const [entryPanelHasScroll, setEntryPanelHasScroll] = useState(false);
+  const sidebarNavRef = useRef<HTMLElement | null>(null);
+  const [sidebarTabIndicatorRect, setSidebarTabIndicatorRect] = useState<{ top: number; height: number; left: number; width: number } | null>(null);
 
   const incrementSubdivision = (key: string, delta = 1, attendanceId?: string) => {
     if (attendanceId) {
@@ -817,7 +969,8 @@ export const SupervisorDashboard: React.FC = () => {
         setSupervisorSellers(sellers);
       } catch (error: any) {
         console.error('Error loading supervisor data:', error);
-        toast.error('Erro ao carregar dados do supervisor');
+        const msg = error?.response?.data?.error || error?.message || 'Sem conexão com o servidor';
+        toast.error(`Erro ao carregar dados do supervisor: ${typeof msg === 'string' ? msg : 'Tente novamente'}`);
         // Fallback para marcas padrão se houver erro
         setSupervisorBrands(['FORD', 'GM', 'VW', 'FIAT', 'IMPORTADOS']);
         setSupervisorSellers([]);
@@ -920,6 +1073,7 @@ export const SupervisorDashboard: React.FC = () => {
     setSelectedFollowUpNode(null);
     setSelectedAttendanceFilter('nao-atribuidos');
     setSelectedNaoAtribuidosFilter('todos');
+    setMobileChatLayer('conversations');
   };
 
   /** Busca conversas de um serviço: vendedores + intervenções (visualização única, sem filtro on/off) */
@@ -981,21 +1135,18 @@ export const SupervisorDashboard: React.FC = () => {
   };
 
   const handleSelectServiceCategory = (category: ServiceCategory) => {
-    const isTogglingOff = selectedServiceCategory === category;
+    if (selectedServiceCategory === category) return;
     setViewingIntervencaoHumana(false);
     setSelectedFollowUpNode(null);
-    setSelectedServiceCategory(isTogglingOff ? null : category);
+    setSelectedServiceCategory(category);
     setSelectedSeller(null);
     setSelectedSellerSubdivision(null);
     setSelectedSellerBrand(null);
     setSelectedAttendanceFilter('tudo');
     setSelectedConversation(null);
     setConversations([]);
-    if (isTogglingOff) {
-      fetchAttributedConversations();
-    } else {
-      fetchServiceConversations(category);
-    }
+    setMobileChatLayer('conversations');
+    fetchServiceConversations(category);
   };
 
   const handleSelectFollowUpNode = (node: FollowUpNode) => {
@@ -1012,6 +1163,7 @@ export const SupervisorDashboard: React.FC = () => {
     setSelectedDemandaKey(null);
     setConversations([]);
     setSearchTerm('');
+    setMobileChatLayer('conversations');
   };
 
   const toggleTodasDemandas = () => {
@@ -1205,7 +1357,9 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const fetchAbertosConversations = async () => {
+  const fetchAbertosConversations = async (conversationToPrepend?: { id: string } & Record<string, unknown>) => {
+    const toPrepend = conversationToPrepend ?? pendingChamarConversationRef.current;
+    if (toPrepend) pendingChamarConversationRef.current = null;
     setIsLoadingConversations(true);
     try {
       const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
@@ -1225,9 +1379,12 @@ export const SupervisorDashboard: React.FC = () => {
         }))
       );
       const seen = new Set<string>();
-      const merged = [...unassigned, ...attributed, ...interventionMerged].filter((c) =>
+      let merged = [...unassigned, ...attributed, ...interventionMerged].filter((c) =>
         seen.has(String(c.id)) ? false : (seen.add(String(c.id)), true)
       );
+      if (toPrepend && !seen.has(String(toPrepend.id))) {
+        merged = [toPrepend as Conversation, ...merged];
+      }
       const readIds = markedAsReadIdsRef.current;
       const toSet = merged
         .map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c))
@@ -1235,9 +1392,10 @@ export const SupervisorDashboard: React.FC = () => {
       setConversations(toSet);
       const totalUnread = toSet.reduce((sum, c) => sum + ((c as { unread?: number }).unread ?? 0), 0);
       setTotalUnreadAbertos(totalUnread);
-    } catch (e) {
+    } catch (e: any) {
       console.error('Error fetching abertos conversations', e);
-      toast.error('Erro ao carregar atendimentos abertos.');
+      const msg = e?.response?.data?.error || e?.message || 'Sem conexão com o servidor';
+      toast.error(`Erro ao carregar atendimentos abertos: ${typeof msg === 'string' ? msg : 'Tente novamente'}`);
       setConversations([]);
       setTotalUnreadAbertos(0);
     } finally {
@@ -1289,6 +1447,24 @@ export const SupervisorDashboard: React.FC = () => {
       if (filter === 'triagem') {
         setUnassignedConversationsCache([]);
       }
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  };
+
+  const fetchFollowUpConversations = async (node: FollowUpNode) => {
+    setIsLoadingConversations(true);
+    try {
+      const list = await attendanceService.getFollowUpAttendances(node);
+      const readIds = markedAsReadIdsRef.current;
+      const toSet = list
+        .map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c))
+        .sort((a, b) => getConversationSortTimestamp(b) - getConversationSortTimestamp(a));
+      setConversations(toSet);
+    } catch (error) {
+      console.error('Error fetching follow-up conversations:', error);
+      toast.error('Erro ao carregar conversas de follow-up.');
+      setConversations([]);
     } finally {
       setIsLoadingConversations(false);
     }
@@ -1425,7 +1601,7 @@ export const SupervisorDashboard: React.FC = () => {
       setSelectedTodasDemandasSubdivision(null);
       setSearchTerm('');
       setConversations([]);
-      setIsLoadingConversations(false);
+      fetchFollowUpConversations(selectedFollowUpNode);
     } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && selectedServiceCategory) {
       setSearchTerm('');
       fetchServiceConversations(selectedServiceCategory);
@@ -1480,6 +1656,86 @@ export const SupervisorDashboard: React.FC = () => {
     supervisorSellers,
   ]);
 
+  /** Atualiza posição do indicador deslizante quando a divisão selecionada muda */
+  const updateSlidingIndicator = useCallback(() => {
+    const container = entryNavInnerRef.current;
+    const active = container?.querySelector<HTMLElement>('[data-division-active]');
+    if (!container || !active) {
+      setSlidingIndicatorRect(null);
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const activeRect = active.getBoundingClientRect();
+    /* Usar getBoundingClientRect: as coordenadas já refletem o scroll (viewport).
+       A diferença activeRect - containerRect dá a posição relativa ao container. */
+    const top = activeRect.top - containerRect.top;
+    const height = activeRect.height;
+    const left = activeRect.left - containerRect.left;
+    const width = activeRect.width;
+    setSlidingIndicatorRect({ top, height, left, width });
+  }, []);
+
+  useLayoutEffect(() => {
+    updateSlidingIndicator();
+    const nav = entryNavRef.current;
+    if (!nav) return;
+    const handleScroll = () => requestAnimationFrame(updateSlidingIndicator);
+    nav.addEventListener('scroll', handleScroll);
+    return () => nav.removeEventListener('scroll', handleScroll);
+  }, [
+    updateSlidingIndicator,
+    selectedAttendanceFilter,
+    selectedNaoAtribuidosFilter,
+    selectedServiceCategory,
+    viewingIntervencaoHumana,
+    selectedTodasDemandasSubdivision,
+    selectedFollowUpNode,
+    selectedFechadosFilter,
+    selectedSeller,
+    selectedSellerSubdivision,
+    expandedTodasDemandas,
+  ]);
+
+  /** Atualiza posição do indicador deslizante na barra lateral (abas Chat, Estatísticas, Contatos) */
+  const updateSidebarTabIndicator = useCallback(() => {
+    const container = sidebarNavRef.current;
+    const active = container?.querySelector<HTMLElement>('[data-sidebar-tab-active]');
+    if (!container || !active) {
+      setSidebarTabIndicatorRect(null);
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const activeRect = active.getBoundingClientRect();
+    const top = activeRect.top - containerRect.top;
+    const height = activeRect.height;
+    const left = activeRect.left - containerRect.left;
+    const width = activeRect.width;
+    setSidebarTabIndicatorRect({ top, height, left, width });
+  }, []);
+
+  useLayoutEffect(() => {
+    const container = sidebarNavRef.current;
+    if (!container) return;
+    updateSidebarTabIndicator();
+    /* Durante a transição da barra (duration-300), atualizar a cada frame para o indicador crescer dinamicamente. */
+    const transitionMs = 320;
+    const start = performance.now();
+    let rafId: number;
+    const tick = () => {
+      updateSidebarTabIndicator();
+      if (performance.now() - start < transitionMs) {
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+    rafId = requestAnimationFrame(tick);
+    const ro = new ResizeObserver(() => updateSidebarTabIndicator());
+    ro.observe(container);
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro.disconnect();
+    };
+  }, [updateSidebarTabIndicator, activeSupervisorTab, sidebarOpen]);
+
   // Removido useEffect que causava duplicação - o total é calculado manualmente quando necessário
 
   // Use refs to access current values in Socket.IO handlers without causing re-registration
@@ -1496,6 +1752,7 @@ export const SupervisorDashboard: React.FC = () => {
   const markAsReadInProgressRef = useRef<Set<string>>(new Set()); // Proteção contra múltiplas chamadas de markAsRead
   const selectedNaoAtribuidosFilterRef = useRef(selectedNaoAtribuidosFilter);
   const selectedServiceCategoryRef = useRef(selectedServiceCategory);
+  const selectedFollowUpNodeRef = useRef(selectedFollowUpNode);
   const supervisorSellersRef = useRef(supervisorSellers);
   /** IDs removidos via fallback (message_received + sellerId). Evita que fetch em flight re-adicione. */
   const recentlyRemovedViaFallbackRef = useRef<Set<string>>(new Set());
@@ -1507,6 +1764,7 @@ export const SupervisorDashboard: React.FC = () => {
   // Update refs when values change
   useEffect(() => {
     selectedConversationRef.current = selectedConversation;
+    if (selectedConversation) setMobileChatLayer('chat');
   }, [selectedConversation]);
   
   useEffect(() => {
@@ -1546,6 +1804,10 @@ export const SupervisorDashboard: React.FC = () => {
   }, [selectedServiceCategory]);
 
   useEffect(() => {
+    selectedFollowUpNodeRef.current = selectedFollowUpNode;
+  }, [selectedFollowUpNode]);
+
+  useEffect(() => {
     supervisorSellersRef.current = supervisorSellers;
   }, [supervisorSellers]);
 
@@ -1577,6 +1839,33 @@ export const SupervisorDashboard: React.FC = () => {
     }
     return activeCountBySubdivision[key] ?? 0;
   }, [activeCountBySubdivision, supervisorSellers]);
+
+  /** Chave que muda ao trocar divisão/subdivisão - usada para animação roll na lista de conversas */
+  const divisionViewKey = useMemo(
+    () =>
+      [
+        selectedAttendanceFilter,
+        selectedNaoAtribuidosFilter,
+        selectedServiceCategory,
+        viewingIntervencaoHumana,
+        selectedTodasDemandasSubdivision,
+        selectedFollowUpNode,
+        selectedFechadosFilter,
+        selectedSeller,
+        selectedSellerSubdivision,
+      ].join('|'),
+    [
+      selectedAttendanceFilter,
+      selectedNaoAtribuidosFilter,
+      selectedServiceCategory,
+      viewingIntervencaoHumana,
+      selectedTodasDemandasSubdivision,
+      selectedFollowUpNode,
+      selectedFechadosFilter,
+      selectedSeller,
+      selectedSellerSubdivision,
+    ]
+  );
 
   const fetchSubdivisionCounts = useCallback(async (options?: { bust?: boolean }) => {
     if (!user?.id || user?.role !== 'SUPERVISOR') return;
@@ -2193,6 +2482,13 @@ export const SupervisorDashboard: React.FC = () => {
         }
         
         fetchSubdivisionCounts();
+        // Quando cliente responde, o follow-up é resetado no backend. Se estamos em follow-up, recarregar a lista
+        // para o card aparecer na coluna correta (ex.: Aguardando 1º) imediatamente.
+        if (isClient && selectedFollowUpNodeRef.current) {
+          fetchFollowUpConversations(selectedFollowUpNodeRef.current).catch((e) =>
+            console.error('Error refreshing follow-up after client message', e)
+          );
+        }
       };
 
       // Listen for sent messages (confirmation from server)
@@ -3058,6 +3354,23 @@ export const SupervisorDashboard: React.FC = () => {
 
       const handleSubdivisionCountsChanged = () => {
         fetchSubdivisionCounts({ bust: true });
+        // Sincroniza também a lista visível para evitar divergência
+        // (contador muda e card permanece na coluna antiga).
+        // Priorizar follow-up quando em visualização de follow-up (ref para valor atual)
+        const followUpNode = selectedFollowUpNodeRef.current;
+        if (followUpNode) {
+          fetchFollowUpConversations(followUpNode).catch((e) =>
+            console.error('Error refreshing follow-up after subdivision_counts_changed', e)
+          );
+        } else if (selectedAttendanceFilterRef.current === 'abertos') {
+          fetchAbertosConversations().catch((e) =>
+            console.error('Error refreshing abertos after subdivision_counts_changed', e)
+          );
+        } else if (selectedAttendanceFilterRef.current === 'nao-atribuidos') {
+          fetchUnassignedConversations(selectedNaoAtribuidosFilterRef.current).catch((e) =>
+            console.error('Error refreshing nao-atribuidos after subdivision_counts_changed', e)
+          );
+        }
       };
       socketService.on('subdivision_counts_changed', handleSubdivisionCountsChanged);
 
@@ -3147,6 +3460,8 @@ export const SupervisorDashboard: React.FC = () => {
       return {
         id: conv.id,
         name: conv.clientName || conv.clientPhone,
+        clientName: conv.clientName,
+        clientPhone: conv.clientPhone,
         lastMessage: formatLastMessage(conv.lastMessage || 'Sem mensagens', (conv as any).lastMessageMediaType),
         time: timeStr,
         unread: conv.unread,
@@ -3159,6 +3474,11 @@ export const SupervisorDashboard: React.FC = () => {
         sellerSubdivision: (conv as any).sellerSubdivision,
         interventionType: (conv as any).interventionType,
         vehicleBrand: (conv as any).vehicleBrand,
+        followUpPhase: (conv as any).followUpPhase,
+        state: (conv as any).state,
+        handledBy: (conv as any).handledBy,
+        lastMessageTime: (conv as any).lastMessageTime,
+        createdAt: (conv as any).createdAt,
       };
     });
   };
@@ -3260,6 +3580,13 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
+  // Chat ao vivo: fade-in quando mensagens carregam (evita piscar)
+  useEffect(() => {
+    if (messages.length > 0 && selectedConversation) {
+      setChatMessagesFadeIn(true);
+    }
+  }, [messages.length, selectedConversation]);
+
   // Clear typing indicator when conversation changes
   useEffect(() => {
     // Clear typing state for all conversations when switching
@@ -3352,6 +3679,8 @@ export const SupervisorDashboard: React.FC = () => {
           to: selectedConversation,
         });
         setMessages([]);
+        setIsLoadingMessages(true); // Evita piscar "Nenhuma mensagem" antes do spinner (loadMessages tem delay de 50ms)
+        setChatMessagesFadeIn(false);
         processedMessageReceivedRef.current.clear();
       }
     }
@@ -3388,6 +3717,7 @@ export const SupervisorDashboard: React.FC = () => {
       const convId = selectedConversation as string;
       const isRefetch = lastFetchedConversationRef.current === convId;
 
+      if (!isRefetch) setSidebarDetailsReady(false);
       isLoadingMessagesRef.current = true;
       setIsLoadingMessages(true);
       if (!isRefetch) {
@@ -3448,18 +3778,24 @@ export const SupervisorDashboard: React.FC = () => {
         setHasMoreMessages(response.pagination?.hasMore || false);
         setMessagesOffset(15);
         
-        // Find and set conversation data (merge interventionData + interventionType from API when present)
+        // Merge API data (evita reorganização: não substitui, só enriquece campos que vêm do attendance)
         const conv = conversations.find(c => c.id === selectedConversation);
-        if (conv) {
-          const hasAttendance = !!response.attendance;
-          const data = hasAttendance
-            ? {
-                ...conv,
-                ...(response.attendance!.interventionData != null && { interventionData: response.attendance!.interventionData }),
-                ...(response.attendance!.interventionType != null && { interventionType: response.attendance!.interventionType }),
-              }
-            : conv;
-          setSelectedConversationData(data);
+        if (conv && response.attendance) {
+          setSelectedConversationData((prev) => {
+            const base = prev ?? conv;
+            return {
+              ...base,
+              ...(response.attendance!.clientPhone != null && { clientPhone: response.attendance!.clientPhone }),
+              ...(response.attendance!.clientName != null && { clientName: response.attendance!.clientName }),
+              ...(response.attendance!.interventionData != null && { interventionData: response.attendance!.interventionData }),
+              ...(response.attendance!.interventionType != null && { interventionType: response.attendance!.interventionType }),
+              ...(response.attendance!.state != null && { state: response.attendance!.state }),
+              ...(response.attendance!.handledBy != null && { handledBy: response.attendance!.handledBy }),
+              ...(response.attendance!.lastMessageTime != null && { lastMessageTime: response.attendance!.lastMessageTime }),
+              ...(response.attendance!.createdAt != null && { createdAt: response.attendance!.createdAt }),
+            };
+          });
+          setSidebarDetailsReady(true);
         }
 
         if (response.attendance?.interventionType) {
@@ -3471,6 +3807,7 @@ export const SupervisorDashboard: React.FC = () => {
         const isAttributedToSeller = (conv as any)?.sellerId || (conv as any)?.attributionSource?.sellerId;
         if (!isAttributedToSeller && !markAsReadInProgressRef.current.has(convIdForMarkRead)) {
           markAsReadInProgressRef.current.add(convIdForMarkRead);
+          const prevUnread = conv ? ((conv as { unread?: number }).unread ?? 0) : 0;
           try {
             await attendanceService.markAsRead(convIdForMarkRead);
             markedAsReadIdsRef.current.add(convIdForMarkRead);
@@ -3488,6 +3825,10 @@ export const SupervisorDashboard: React.FC = () => {
                 }
                 return updated;
               });
+            }
+            // Decrementar badge de Abertos ao marcar como lido (qualquer subdivisão: AI, Intervenção, Atribuídos, etc.)
+            if (prevUnread > 0) {
+              setTotalUnreadAbertos((u) => Math.max(0, u - prevUnread));
             }
           } catch (error: any) {
             console.error('Error marking as read:', error);
@@ -3549,6 +3890,7 @@ export const SupervisorDashboard: React.FC = () => {
         toast.error('Erro ao carregar mensagens');
         setMessages([]);
         setSelectedConversationData(null);
+        setSidebarDetailsReady(false);
       } finally {
         isLoadingMessagesRef.current = false;
         setIsLoadingMessages(false);
@@ -3569,6 +3911,8 @@ export const SupervisorDashboard: React.FC = () => {
     if (!convId) {
       setMessages([]);
       setSelectedConversationData(null);
+      setSidebarDetailsReady(false);
+      setChatMessagesFadeIn(false);
       lastFetchedConversationRef.current = null;
       processedMessageReceivedRef.current.clear();
       isLoadingMessagesRef.current = false;
@@ -3579,6 +3923,7 @@ export const SupervisorDashboard: React.FC = () => {
     // Só carregar se realmente mudou a conversa ou se for um refresh explícito
     // E se não estiver já carregando
     if (!isLoadingMessagesRef.current && (hasConversationChanged || isExplicitRefresh)) {
+      setIsLoadingMessages(true); // Imediato: evita piscar "Nenhuma mensagem" nos 50ms antes de loadMessages
       // Usar um pequeno delay para evitar múltiplas chamadas rápidas
       const timeoutId = setTimeout(() => {
         // Verificar novamente antes de executar (pode ter mudado durante o timeout)
@@ -3708,8 +4053,8 @@ export const SupervisorDashboard: React.FC = () => {
 
   const handleSendAudioRecording = async (audioBlob: Blob) => {
     try {
-      // Convert blob to File
-      const audioFile = new File([audioBlob], `audio-${Date.now()}.webm`, { type: 'audio/webm' });
+      const ext = audioBlob.type.includes('mp4') || audioBlob.type.includes('m4a') ? 'm4a' : 'webm';
+      const audioFile = new File([audioBlob], `audio-${Date.now()}.${ext}`, { type: audioBlob.type });
       await handleSendMedia(audioFile);
       setShowAudioRecorder(false);
     } catch (error: any) {
@@ -4063,10 +4408,10 @@ export const SupervisorDashboard: React.FC = () => {
   const closedTreeSymbolActive = 'text-sky-600 dark:text-sky-400';
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-100 dark:bg-slate-950">
-      {/* Sidebar Left - Icons */}
+    <div className="flex h-screen overflow-hidden bg-slate-100 dark:bg-slate-950 flex-col md:flex-row page-load-fade">
+      {/* Sidebar Left - Desktop only */}
       <aside
-        className={`${sidebarOpen ? 'w-56' : 'w-16'} transition-all duration-300 flex flex-col items-center py-4 bg-navy text-white flex-shrink-0 z-20`}
+        className={`hidden md:flex ${sidebarOpen ? 'w-56' : 'w-16'} transition-all duration-300 flex-col items-center py-4 bg-navy text-white flex-shrink-0 z-20`}
         style={{ backgroundColor: isDarkMode ? '#F07000' : '#003070' }}
       >
         <div className="mb-4 flex items-center justify-center w-full">
@@ -4108,26 +4453,51 @@ export const SupervisorDashboard: React.FC = () => {
             <span className="material-icons-round">chevron_right</span>
           </button>
         )}
-        <nav className={`flex flex-col space-y-3 flex-grow ${sidebarOpen ? 'px-3 w-full' : 'px-0 items-center'}`}>
+        <nav ref={sidebarNavRef} className={`relative flex flex-col space-y-3 flex-grow ${sidebarOpen ? 'px-3 w-full' : 'px-0 items-center'}`}>
+          {/* Indicador deslizante nas abas da barra lateral */}
+          {sidebarTabIndicatorRect && (
+            <div
+              className="absolute rounded-lg bg-white/20 pointer-events-none z-0 transition-[top,height,left,width] duration-75 ease-out"
+              style={{
+                top: sidebarTabIndicatorRect.top,
+                height: sidebarTabIndicatorRect.height,
+                left: sidebarTabIndicatorRect.left,
+                width: sidebarTabIndicatorRect.width,
+              }}
+            />
+          )}
           <button
             type="button"
-            onClick={() => setActiveSupervisorTab('chat')}
-            className={`p-2 rounded-lg transition-colors flex items-center ${
-              activeSupervisorTab === 'chat' ? 'bg-white/20' : 'hover:bg-white/10'
-            } ${sidebarOpen ? 'gap-3 w-full' : 'justify-center'}`}
+            data-sidebar-tab-active={activeSupervisorTab === 'chat' ? true : undefined}
+            onClick={() => handleSupervisorTabChange('chat')}
+            className={`relative z-10 p-2 rounded-lg transition-colors duration-300 ease-out flex items-center active:scale-95 hover:bg-white/10 ${
+              sidebarOpen ? 'gap-3 w-full' : 'justify-center'
+            }`}
           >
             <span className="material-icons-round">chat</span>
             {sidebarOpen && <span className="text-sm">Chat</span>}
           </button>
           <button
             type="button"
-            onClick={() => setActiveSupervisorTab('estatisticas')}
-            className={`p-2 rounded-lg transition-colors flex items-center ${
-              activeSupervisorTab === 'estatisticas' ? 'bg-white/20' : 'hover:bg-white/10'
-            } ${sidebarOpen ? 'gap-3 w-full' : 'justify-center'}`}
+            data-sidebar-tab-active={activeSupervisorTab === 'estatisticas' ? true : undefined}
+            onClick={() => handleSupervisorTabChange('estatisticas')}
+            className={`relative z-10 p-2 rounded-lg transition-colors duration-300 ease-out flex items-center active:scale-95 hover:bg-white/10 ${
+              sidebarOpen ? 'gap-3 w-full' : 'justify-center'
+            }`}
           >
             <span className="material-icons-round">analytics</span>
             {sidebarOpen && <span className="text-sm">Estatísticas</span>}
+          </button>
+          <button
+            type="button"
+            data-sidebar-tab-active={activeSupervisorTab === 'contatos' ? true : undefined}
+            onClick={() => handleSupervisorTabChange('contatos')}
+            className={`relative z-10 p-2 rounded-lg transition-colors duration-300 ease-out flex items-center active:scale-95 hover:bg-white/10 ${
+              sidebarOpen ? 'gap-3 w-full' : 'justify-center'
+            }`}
+          >
+            <span className="material-icons-round">contacts</span>
+            {sidebarOpen && <span className="text-sm">Contatos</span>}
           </button>
         </nav>
         <div className={`mt-auto w-full ${sidebarOpen ? 'px-3' : 'px-0'}`}>
@@ -4155,19 +4525,63 @@ export const SupervisorDashboard: React.FC = () => {
         </div>
       </aside>
 
-      {/* Entry/Marcas Panel */}
+      {/* Mobile Bottom Navigation */}
+      <nav
+        className="md:hidden fixed bottom-0 left-0 right-0 z-50 flex items-center justify-around h-14 text-white safe-area-pb"
+        style={{ backgroundColor: isDarkMode ? '#F07000' : '#003070' }}
+      >
+        {([
+          { key: 'chat' as SupervisorTab, icon: 'chat', label: 'Chat' },
+          { key: 'estatisticas' as SupervisorTab, icon: 'analytics', label: 'Estatísticas' },
+          { key: 'contatos' as SupervisorTab, icon: 'contacts', label: 'Contatos' },
+        ]).map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => handleSupervisorTabChange(item.key)}
+            className={`flex flex-col items-center justify-center flex-1 h-full transition-all duration-300 ease-out active:scale-95 ${activeSupervisorTab === item.key ? 'bg-white/20' : ''}`}
+          >
+            <span className="material-icons-round text-xl">{item.icon}</span>
+            <span className="text-[10px] mt-0.5">{item.label}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={toggleTheme}
+          className="flex flex-col items-center justify-center flex-1 h-full transition-colors"
+        >
+          <span className="material-icons-round text-xl">{isDarkMode ? 'light_mode' : 'dark_mode'}</span>
+          <span className="text-[10px] mt-0.5">Tema</span>
+        </button>
+      </nav>
+
+      {/* Chat content wrapper - mobile slide transitions */}
+      <div className="flex flex-1 min-h-0 overflow-hidden md:overflow-visible flex-col md:flex-row relative">
       {activeSupervisorTab === 'chat' && (
-      <>
-      <div className={`${entryPanelHasScroll ? 'w-[304px]' : 'w-72'} border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col flex-shrink-0 transition-[width] duration-200 ease-out h-full min-h-0 dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200`}>
+      <div key="chat-entry-conversations" className={`flex flex-1 md:flex-initial md:flex-shrink-0 min-h-0 flex-col md:flex-row ${hasUserSwitchedTabs ? 'chat-panels-slide-in' : 'animate-slideRollIn'}`}>
+      <div className={`absolute md:relative inset-0 md:inset-auto flex ${entryPanelHasScroll ? 'md:w-[304px]' : 'md:w-72'} w-full min-w-full md:min-w-0 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex-col flex-shrink-0 transition-[transform,width] duration-300 ease-out h-full min-h-0 pb-14 md:pb-0 dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200 ${mobileChatLayer === 'entry' ? 'translate-x-0' : '-translate-x-full'} md:!translate-x-0 ${mobileChatLayer !== 'entry' ? 'pointer-events-none' : ''} md:pointer-events-auto`}>
         <div className="p-5 flex justify-between items-center flex-shrink-0">
           <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">Entrada</h1>
         </div>
         <nav ref={entryNavRef} className="flex-grow overflow-y-auto px-2 custom-scrollbar scrollbar-left space-y-1 min-h-0">
-          <div className="scrollbar-left-inner space-y-1 min-h-0">
+          <div ref={entryNavInnerRef} className="scrollbar-left-inner space-y-1 min-h-0 relative">
+          {/* Indicador deslizante - move suavemente entre as divisões selecionadas */}
+          {slidingIndicatorRect && (
+            <div
+              className="absolute rounded-lg bg-slate-50 dark:bg-slate-800 pointer-events-none z-0 transition-[top,height,left,width] duration-300 ease-in-out"
+              style={{
+                top: slidingIndicatorRect.top,
+                height: slidingIndicatorRect.height,
+                left: slidingIndicatorRect.left,
+                width: slidingIndicatorRect.width,
+              }}
+            />
+          )}
           <div className="px-3 py-4 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Atendimentos</div>
           <div className="mb-6 space-y-1">
             <button
               type="button"
+              data-division-active={selectedAttendanceFilter === 'abertos' ? true : undefined}
               onClick={() => {
                 setSelectedAttendanceFilter('abertos');
                 setViewingIntervencaoHumana(false);
@@ -4179,10 +4593,11 @@ export const SupervisorDashboard: React.FC = () => {
                 setSelectedTodasDemandasSubdivision(null);
                 setSelectedSeller(null);
                 setSelectedSellerBrand(null);
+                setMobileChatLayer('conversations');
               }}
-              className={`w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors min-w-0 ${
+              className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
                 isOpenTreeActive
-                  ? 'bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-white font-medium'
+                  ? 'text-slate-900 dark:text-white font-medium'
                   : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
               style={isOpenTreeActive ? selectedNavTextStyle : {}}
@@ -4200,19 +4615,20 @@ export const SupervisorDashboard: React.FC = () => {
                 )}
               </div>
             </button>
-            <div className={`ml-4 border-l pl-2 space-y-0.5 ${firstBranchLineClass}`}>
+            <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${firstBranchLineClass}`}>
               <button
                 type="button"
+                data-division-active={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? true : undefined}
                 onClick={handleSelectNaoAtribuidos}
-                className={`w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors min-w-0 ${
+                className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
                   selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos'
-                    ? 'bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-white font-medium'
+                    ? 'text-slate-900 dark:text-white font-medium'
                     : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
                 style={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? selectedNavTextStyle : {}}
               >
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                  <span className={`font-mono text-xs ${isAiNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>├─</span>
+                  <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isAiNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>├─</span>
                   <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">smart_toy</span>
                   <div className="flex flex-col items-start min-w-0">
                     <span className="truncate">AI</span>
@@ -4233,6 +4649,7 @@ export const SupervisorDashboard: React.FC = () => {
               <div className="space-y-0.5">
                 <button
                   type="button"
+                  data-division-active={viewingIntervencaoHumana && !selectedServiceCategory ? true : undefined}
                   onClick={() => {
                     setViewingIntervencaoHumana(true);
                     setSelectedServiceCategory(null);
@@ -4243,16 +4660,17 @@ export const SupervisorDashboard: React.FC = () => {
                     setSelectedTodasDemandasSubdivision(null);
                     setSelectedSeller(null);
                     setSelectedSellerBrand(null);
+                    setMobileChatLayer('conversations');
                   }}
-                  className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors ${
+                  className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
                     viewingIntervencaoHumana
-                      ? 'bg-slate-50 dark:bg-slate-800 text-navy dark:text-white font-medium'
+                      ? 'text-navy dark:text-white font-medium'
                       : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                   }`}
                   style={viewingIntervencaoHumana ? selectedNavTextStyle : {}}
                 >
                   <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                    <span className={`font-mono text-xs ${isInterventionNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>└─</span>
+                    <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isInterventionNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>└─</span>
                     <span className="material-icons-round text-lg flex-shrink-0">engineering</span>
                     <div className="flex flex-col items-start min-w-0">
                       <span>Intervenção Humana</span>
@@ -4271,7 +4689,7 @@ export const SupervisorDashboard: React.FC = () => {
                   </div>
                 </button>
 
-                <div className={`ml-4 border-l pl-2 space-y-0.5 ${secondBranchLineClass}`}>
+                <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${secondBranchLineClass}`}>
                   {SERVICE_CATEGORIES.map(({ key, label, icon }, idx) => {
                     const sellers = getSellersByServiceCategory(key);
                     const sellersActiveCount = sellers.reduce((sum, s) => sum + (getActiveCount(`seller-${s.id}`) || 0), 0);
@@ -4288,15 +4706,16 @@ export const SupervisorDashboard: React.FC = () => {
                       <button
                         key={key}
                         type="button"
+                        data-division-active={isSelected ? true : undefined}
                         onClick={() => handleSelectServiceCategory(key)}
-                        className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors ${
+                        className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
                           isSelected
-                            ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white'
+                            ? 'text-slate-900 dark:text-white'
                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                         }`}
                       >
                         <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                          <span className={`font-mono text-xs ${serviceBranchClass}`}>{branch}</span>
+                          <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${serviceBranchClass}`}>{branch}</span>
                           <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">{icon}</span>
                           <div className="flex flex-col items-start min-w-0">
                             <span>{label}</span>
@@ -4306,46 +4725,6 @@ export const SupervisorDashboard: React.FC = () => {
                       </button>
                     );
                   })}
-                </div>
-
-                <div className="ml-3 mt-0.5">
-                  <div className="space-y-1">
-                    {(() => {
-                      const relocationNotifs = (notifications || []).filter(
-                        (n) => n.type === 'ATTENDANCE_RELOCATED_INTERVENTION' && !n.isRead
-                      );
-                      if (relocationNotifs.length === 0) return null;
-                      return (
-                        <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
-                          <div className="px-2 pb-1.5 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-                            Realocadas
-                          </div>
-                          {relocationNotifs.map((n) => (
-                            <button
-                              key={n.id}
-                              onClick={async () => {
-                                if (!n.attendanceId) return;
-                                setViewingIntervencaoHumana(true);
-                                setSelectedServiceCategory(null);
-                                setSelectedSeller(null);
-                                setSelectedSellerBrand(null);
-                                setSelectedTodasDemandasSubdivision(null);
-                                setSelectedDemandaKey(null);
-                                setSelectedAttendanceFilter('tudo');
-                                await fetchAllInterventionConversations();
-                                setSelectedConversation(n.attendanceId);
-                                await markRelocationAsReadByAttendance(n.attendanceId);
-                              }}
-                              className="w-full flex items-center space-x-2 px-3 py-2 text-left rounded-lg bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
-                            >
-                              <span className="material-icons-round text-amber-600 dark:text-amber-400 text-sm">swap_horiz</span>
-                              <span className="text-xs text-slate-700 dark:text-slate-200 truncate flex-1">{n.title}</span>
-                            </button>
-                          ))}
-                        </div>
-                      );
-                    })()}
-                  </div>
                 </div>
               </div>
             </div>
@@ -4358,10 +4737,11 @@ export const SupervisorDashboard: React.FC = () => {
           {/* Follow up - raiz da árvore */}
           <button
             type="button"
+            data-division-active={selectedFollowUpNode === 'follow-up' ? true : undefined}
             onClick={() => handleSelectFollowUpNode('follow-up')}
-            className={`w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg transition-colors ${
+            className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
               selectedFollowUpNode === 'follow-up'
-                ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                ? 'text-slate-900 dark:text-white font-medium'
                 : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
             }`}
             style={selectedFollowUpNode === 'follow-up' ? selectedNavTextStyle : {}}
@@ -4377,22 +4757,23 @@ export const SupervisorDashboard: React.FC = () => {
             </div>
           </button>
 
-          <div className={`ml-4 border-l pl-2 space-y-0.5 ${closedTreeLineClass}`}>
+          <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${closedTreeLineClass}`}>
               <button
                 type="button"
+                data-division-active={selectedFollowUpNode === 'inativo-1h' ? true : undefined}
                 onClick={() => handleSelectFollowUpNode('inativo-1h')}
-                className={`w-full px-3 py-2 text-sm rounded-lg transition-colors text-left ${
+                className={`relative z-10 w-full px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
                   selectedFollowUpNode === 'inativo-1h'
-                    ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                    ? 'text-slate-900 dark:text-white font-medium'
                     : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
                 style={selectedFollowUpNode === 'inativo-1h' ? selectedNavTextStyle : {}}
               >
                 <div className="flex flex-col items-start min-w-0">
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className={`font-mono text-xs ${isFollowUp1hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
+                    <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp1hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
                     <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">hourglass_top</span>
-                    <span className="truncate">Inativo a mais de 1 hora</span>
+                    <span className="truncate">Aguardando 1º Follow up</span>
                   </div>
                   <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
                     {activeCountBySubdivision['inativo-1h'] ?? 0} Atendimentos nessa fase
@@ -4400,22 +4781,23 @@ export const SupervisorDashboard: React.FC = () => {
                 </div>
               </button>
 
-              <div className={`ml-4 border-l pl-2 space-y-0.5 ${isFollowUp1hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
+              <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${isFollowUp1hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
                 <button
                   type="button"
+                  data-division-active={selectedFollowUpNode === 'inativo-12h' ? true : undefined}
                   onClick={() => handleSelectFollowUpNode('inativo-12h')}
-                  className={`w-full px-3 py-2 text-sm rounded-lg transition-colors text-left ${
+                  className={`relative z-10 w-full px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
                     selectedFollowUpNode === 'inativo-12h'
-                      ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                      ? 'text-slate-900 dark:text-white font-medium'
                       : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
                   }`}
                   style={selectedFollowUpNode === 'inativo-12h' ? selectedNavTextStyle : {}}
                 >
                   <div className="flex flex-col items-start min-w-0">
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <span className={`font-mono text-xs ${isFollowUp12hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
+                      <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp12hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
                       <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">update</span>
-                      <span className="truncate">Inativo +12h</span>
+                      <span className="truncate">Aguardando 2º Follow up</span>
                     </div>
                     <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
                       {activeCountBySubdivision['inativo-12h'] ?? 0} Atendimentos nessa fase
@@ -4423,22 +4805,23 @@ export const SupervisorDashboard: React.FC = () => {
                   </div>
                 </button>
 
-                <div className={`ml-4 border-l pl-2 ${isFollowUp12hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
+                <div className={`ml-4 border-l pl-2 transition-colors duration-500 ease-in-out ${isFollowUp12hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
                   <button
                     type="button"
+                    data-division-active={selectedFollowUpNode === 'inativo-24h' ? true : undefined}
                     onClick={() => handleSelectFollowUpNode('inativo-24h')}
-                    className={`w-full px-3 py-2 text-sm rounded-lg transition-colors text-left ${
+                    className={`relative z-10 w-full px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
                       selectedFollowUpNode === 'inativo-24h'
-                        ? 'bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                        ? 'text-slate-900 dark:text-white font-medium'
                         : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
                     }`}
                     style={selectedFollowUpNode === 'inativo-24h' ? selectedNavTextStyle : {}}
                   >
                     <div className="flex flex-col items-start min-w-0">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <span className={`font-mono text-xs ${isFollowUp24hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
+                        <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp24hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
                         <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">timer</span>
-                        <span className="truncate">Inativo 24+h</span>
+                        <span className="truncate">Aguardando</span>
                       </div>
                       <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
                         {activeCountBySubdivision['inativo-24h'] ?? 0} Atendimentos nessa fase
@@ -4455,6 +4838,8 @@ export const SupervisorDashboard: React.FC = () => {
 
           {/* Fechados - fora da árvore */}
           <button
+            type="button"
+            data-division-active={isFechadosActive ? true : undefined}
             onClick={() => {
               setSelectedConversation(null);
               setSelectedSeller(null);
@@ -4468,10 +4853,11 @@ export const SupervisorDashboard: React.FC = () => {
               setSelectedFechadosFilter(true);
               setSelectedFollowUpNode(null);
               setPendingQuotes([]);
+              setMobileChatLayer('conversations');
             }}
-            className={`w-full flex items-center justify-center px-3 py-2 text-sm rounded-lg transition-colors ${
+            className={`relative z-10 w-full flex items-center justify-center px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
               isFechadosActive
-                ? 'bg-slate-50 dark:bg-slate-800 text-navy dark:text-white font-medium'
+                ? 'text-navy dark:text-white font-medium'
                 : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
             }`}
             style={isFechadosActive ? selectedNavTextStyle : {}}
@@ -4490,11 +4876,18 @@ export const SupervisorDashboard: React.FC = () => {
       </div>
 
       {/* Conversations List */}
-      <div className="w-80 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col flex-shrink-0 dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200">
+      <div className={`absolute md:relative inset-0 md:inset-auto flex w-full min-w-full md:min-w-0 md:w-80 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex-col flex-shrink-0 flex-1 md:flex-initial min-h-0 dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200 transition-[transform] duration-300 ease-out ${mobileChatLayer === 'entry' ? 'translate-x-full' : mobileChatLayer === 'conversations' ? 'translate-x-0' : '-translate-x-full'} md:!translate-x-0 ${mobileChatLayer !== 'conversations' ? 'pointer-events-none' : ''} md:pointer-events-auto`}>
         <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center space-x-2 min-w-0">
-              <span className="material-icons-round text-slate-400 flex-shrink-0">sort</span>
+              <button
+                type="button"
+                onClick={() => setMobileChatLayer('entry')}
+                className="md:hidden p-1 -ml-1 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 flex-shrink-0"
+              >
+                <span className="material-icons-round text-lg">arrow_back</span>
+              </button>
+              <span className="material-icons-round text-slate-400 flex-shrink-0 hidden md:inline">sort</span>
               <span className="font-bold text-sm truncate text-slate-900 dark:text-white">{isPedidosOrcamentosView ? 'Pedidos de Orçamentos' : getConversationsHeaderTitle()}</span>
             </div>
             {!isPedidosOrcamentosView && !selectedTodasDemandasSubdivision && !selectedFechadosFilter && (
@@ -4597,7 +4990,8 @@ export const SupervisorDashboard: React.FC = () => {
             />
           </div>
         </div>
-        <div className="flex-grow overflow-y-auto custom-scrollbar">
+        <div className="flex-grow overflow-y-auto custom-scrollbar pb-14 md:pb-0 overflow-x-hidden">
+          <div key={divisionViewKey} className="animate-slideRollIn min-h-full">
           {isPedidosOrcamentosView ? (
             (() => {
               const isEnviados = !viewingFromDemandasCard && quoteSubTab === 'enviados';
@@ -4606,7 +5000,7 @@ export const SupervisorDashboard: React.FC = () => {
                 ? rawList.filter((q) => q.sellerId === selectedSeller)
                 : rawList;
               return isLoadingQuotes ? (
-                <div className="flex items-center justify-center h-32">
+                <div className="flex items-center justify-center h-32 animate-slideRollIn">
                   <span className="material-icons-round animate-spin text-slate-400">refresh</span>
                   <span className="ml-2 text-sm text-slate-400">Carregando pedidos...</span>
                 </div>
@@ -4668,7 +5062,7 @@ export const SupervisorDashboard: React.FC = () => {
             })()
           ) : selectedTodasDemandasSubdivision ? (
             isLoadingPendingQuotes ? (
-              <div className="flex items-center justify-center h-32">
+              <div className="flex items-center justify-center h-32 animate-slideRollIn">
                 <span className="material-icons-round animate-spin text-slate-400">refresh</span>
                 <span className="ml-2 text-sm text-slate-400">Carregando pendências...</span>
               </div>
@@ -4764,11 +5158,13 @@ export const SupervisorDashboard: React.FC = () => {
               })()
             )
           ) : isLoadingConversations ? (
-            <div className="flex items-center justify-center h-32">
+            <div className="flex items-center justify-center h-32 animate-slideRollIn">
               <span className="material-icons-round animate-spin text-slate-400">refresh</span>
               <span className="ml-2 text-sm text-slate-400">Carregando conversas...</span>
             </div>
-          ) : (selectedSeller || selectedServiceCategory || (viewingIntervencaoHumana && !selectedServiceCategory) || selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'nao-atribuidos' || selectedAttendanceFilter === 'tudo' || !!selectedFollowUpNode) && conversations.length > 0 ? (
+          ) : (
+            <div key={`${divisionViewKey}-loaded`} className="animate-slideRollIn min-h-full">
+            {(selectedSeller || selectedServiceCategory || (viewingIntervencaoHumana && !selectedServiceCategory) || selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'nao-atribuidos' || selectedAttendanceFilter === 'tudo' || !!selectedFollowUpNode) && conversations.length > 0 ? (
             (() => {
               const filteredConversations = formatConversationsForDisplay(conversations)
                 .filter((conv) => {
@@ -4823,7 +5219,10 @@ export const SupervisorDashboard: React.FC = () => {
                     });
                     return;
                   }
+                  // Evitar sobrescrever selectedConversationData ao clicar na mesma conversa (itens da lista podem não ter handledBy)
+                  if (selectedConversation === conv.id) return;
                   setSelectedConversation(conv.id);
+                  setSelectedConversationData(conv as Conversation); // Dados imediatos para evitar "piscar" na sidebar
 
                   // Marcar conversa como lida no backend (supervisor NÃO pode marcar atendimento atribuído a vendedor)
                   const isAttributedToSeller = (conv as any)?.sellerId || (conv as any)?.attributionSource?.sellerId;
@@ -4883,6 +5282,21 @@ export const SupervisorDashboard: React.FC = () => {
                     <div className="min-w-0 flex-1">
                       <h4 className="text-sm font-bold truncate text-slate-900 dark:text-white">{conv.name}</h4>
                       {(() => {
+                        // View Follow-up: badge indicando fase (1º, 2º ou Aguardando)
+                        if (selectedFollowUpNode && (conv as any).followUpPhase) {
+                          const phase = (conv as any).followUpPhase;
+                          const phaseColors: Record<string, string> = {
+                            'Aguardando 1º Follow up': 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200',
+                            'Aguardando 2º Follow up': 'bg-orange-100 dark:bg-orange-900/40 text-orange-800 dark:text-orange-200',
+                            'Aguardando': 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400',
+                          };
+                          const color = phaseColors[phase] ?? 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400';
+                          return (
+                            <span className={`inline-block mt-0.5 text-[10px] px-1.5 py-0.5 rounded truncate max-w-[140px] font-medium ${color}`} title={phase}>
+                              {phase}
+                            </span>
+                          );
+                        }
                         // View Abertos: badge indicando origem (AI, Intervenção, Vendedor)
                         if (selectedAttendanceFilter === 'abertos') {
                           const att = (conv as any).attributionSource;
@@ -5026,15 +5440,353 @@ export const SupervisorDashboard: React.FC = () => {
               </div>
             </div>
           )}
+            </div>
+          )}
+          </div>
         </div>
       </div>
-      </>
+      </div>
       )}
 
-      {/* Main Chat Area */}
-      <main className={`flex-1 flex flex-col min-w-0 min-h-0 bg-slate-100 dark:bg-slate-950 ${activeSupervisorTab === 'estatisticas' ? 'overflow-hidden' : ''}`}>
-        {activeSupervisorTab === 'estatisticas' ? (
-          <div className="flex-1 min-h-0 min-w-0 overflow-hidden bg-slate-100 dark:bg-slate-950 relative flex flex-col">
+      {/* Main Chat Area - tab slide transitions on mobile and desktop */}
+      <main className={`flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative isolate pb-14 md:pb-0 ${activeSupervisorTab === 'chat' ? `absolute md:relative inset-0 md:inset-auto transition-[transform] duration-300 ease-out ${mobileChatLayer === 'chat' ? 'translate-x-0' : 'translate-x-full'} md:!translate-x-0 ${mobileChatLayer !== 'chat' ? 'pointer-events-none' : ''} md:pointer-events-auto` : ''}`}>
+        {/* Contatos section - slides na direção do indicador (vertical desktop, horizontal mobile) */}
+        <div className={`absolute inset-0 w-full min-w-full md:min-w-0 flex flex-col min-h-0 supervisor-tab-panel ${getSupervisorTabSlideClass('contatos', activeSupervisorTab)} ${activeSupervisorTab !== 'contatos' ? 'pointer-events-none' : 'pointer-events-auto'}`}>
+          <div className="flex-1 min-h-0 min-w-0 overflow-auto bg-slate-100 dark:bg-slate-950 p-3 sm:p-5 pb-20 md:pb-5">
+            <div className="max-w-5xl mx-auto space-y-4">
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-xl font-bold text-slate-900 dark:text-white">Contatos</h2>
+                    <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400">Todos os contatos que já interagiram.</p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {!contactsBulkSelectMode ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setShowImportModal(true)}
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 sm:px-4 py-2 text-white rounded-lg hover:opacity-90 transition-opacity text-xs sm:text-sm font-medium"
+                        style={{ backgroundColor: '#1e293b' }}
+                      >
+                        <span className="material-icons-round text-base">upload_file</span>
+                        <span className="hidden sm:inline">Importar contatos</span>
+                        <span className="sm:hidden">Importar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setContactsBulkSelectMode(true); setSelectedContactsForBulk(new Set()); }}
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-lg border-2 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-opacity text-xs sm:text-sm font-medium"
+                      >
+                        <span className="material-icons-round text-base">checklist</span>
+                        Selecionar
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => { setContactsBulkSelectMode(false); setSelectedContactsForBulk(new Set()); }}
+                        className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs sm:text-sm font-medium"
+                      >
+                        Cancelar
+                      </button>
+                      {selectedContactsForBulk.size > 0 && (
+                        <button
+                          type="button"
+                          disabled={isDeletingContactsBulk}
+                          onClick={async () => {
+                            if (!confirm(`Excluir ${selectedContactsForBulk.size} contato(s) selecionado(s)? Todos os atendimentos serão removidos. Esta ação não pode ser desfeita.`)) return;
+                            const phones = Array.from(selectedContactsForBulk);
+                            setIsDeletingContactsBulk(true);
+                            let successCount = 0;
+                            const norm = (p: string) => p.replace(/\D/g, '');
+                            for (const clientPhone of phones) {
+                              try {
+                                await contactsService.deleteContact(clientPhone);
+                                setContactsList((prev) => prev.filter((c) => norm(c.clientPhone) !== norm(clientPhone)));
+                                successCount++;
+                              } catch (e: any) {
+                                toast.error(e?.response?.data?.error || `Erro ao excluir ${clientPhone}`);
+                              }
+                              setSelectedContactsForBulk((prev) => {
+                                const next = new Set(prev);
+                                next.delete(clientPhone);
+                                return next;
+                              });
+                            }
+                            setIsDeletingContactsBulk(false);
+                            toast.success(`${successCount} contato(s) excluído(s)`);
+                            if (successCount === phones.length) setContactsBulkSelectMode(false);
+                          }}
+                          className="flex items-center justify-center gap-2 px-3 sm:px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs sm:text-sm font-medium"
+                        >
+                          {isDeletingContactsBulk ? (
+                            <span className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+                          ) : (
+                            <span className="material-icons-round text-base">delete_outline</span>
+                          )}
+                          Excluir {selectedContactsForBulk.size} selecionado(s)
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 sm:items-stretch">
+                <div className="relative flex-1 flex">
+                  <span className="material-icons-round absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-lg pointer-events-none">search</span>
+                  <input
+                    type="text"
+                    placeholder="Buscar por nome ou telefone..."
+                    value={contactsSearch}
+                    onChange={(e) => setContactsSearch(e.target.value)}
+                    className="w-full h-11 pl-10 pr-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500 transition-all"
+                  />
+                </div>
+                <div className="relative min-w-[180px] flex" ref={contactsSortDropdownRef}>
+                  <button
+                    type="button"
+                    onClick={() => setContactsSortDropdownOpen((o) => !o)}
+                    className="w-full h-11 flex items-center justify-between gap-2 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-900 dark:text-white hover:border-slate-300 dark:hover:border-slate-600 focus:outline-none focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500 transition-all"
+                  >
+                    <span>{contactsSortOrder === 'recent' ? 'Mais recentes' : 'Ordem alfabética'}</span>
+                    <span className={`material-icons-round text-lg text-slate-400 transition-transform ${contactsSortDropdownOpen ? 'rotate-180' : ''}`}>expand_more</span>
+                  </button>
+                  {contactsSortDropdownOpen && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 z-50 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => { setContactsSortOrder('recent'); setContactsSortDropdownOpen(false); }}
+                        className={`w-full h-10 flex items-center justify-between px-4 text-left text-sm transition-colors ${contactsSortOrder === 'recent' ? 'bg-sky-50 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400' : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+                      >
+                        Mais recentes
+                        {contactsSortOrder === 'recent' && <span className="material-icons-round text-lg">check</span>}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setContactsSortOrder('alphabetical'); setContactsSortDropdownOpen(false); }}
+                        className={`w-full h-10 flex items-center justify-between px-4 text-left text-sm transition-colors ${contactsSortOrder === 'alphabetical' ? 'bg-sky-50 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400' : 'text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'}`}
+                      >
+                        Ordem alfabética
+                        {contactsSortOrder === 'alphabetical' && <span className="material-icons-round text-lg">check</span>}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {contactsLoading ? (
+                <div className="flex items-center justify-center py-20">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-sky-500" />
+                </div>
+              ) : filteredContacts.length === 0 ? (
+                <div className="text-center py-20 text-slate-400 dark:text-slate-500">
+                  <span className="material-icons-round text-5xl mb-3 block">person_off</span>
+                  <p className="text-sm">{contactsSearch ? 'Nenhum contato encontrado' : 'Nenhum contato registrado'}</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 items-stretch">
+                  {filteredContacts.map((contact) => {
+                    const displayName = contact.clientName || contact.clientPhone || 'Sem nome';
+                    const avatarUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=F07000&color=fff&size=96`;
+                    const isContactSelected = selectedContactsForBulk.has(contact.clientPhone);
+                    return (
+                      <div
+                        key={contact.clientPhone}
+                        onClick={() => {
+                          if (contactsBulkSelectMode) {
+                            setSelectedContactsForBulk((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(contact.clientPhone)) next.delete(contact.clientPhone);
+                              else next.add(contact.clientPhone);
+                              return next;
+                            });
+                          }
+                        }}
+                        className={`rounded-2xl border-2 p-3 sm:p-5 shadow-sm hover:shadow-md transition-all flex flex-col sm:min-h-[180px] cursor-pointer ${
+                          contactsBulkSelectMode
+                            ? isContactSelected
+                              ? 'border-red-500 ring-2 ring-red-500/30 bg-red-50/30 dark:bg-red-900/10'
+                              : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-slate-300 dark:hover:border-slate-600'
+                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-sky-200 dark:hover:border-sky-800'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 sm:items-start sm:gap-4 flex-1 min-h-0">
+                          {contactsBulkSelectMode && (
+                            <div className="flex-shrink-0 w-8 h-8 sm:w-10 sm:h-10 rounded-full border-2 flex items-center justify-center" style={{ borderColor: isContactSelected ? '#ef4444' : '#94a3b8', backgroundColor: isContactSelected ? '#ef4444' : 'transparent' }}>
+                              {isContactSelected && <span className="material-icons-round text-white text-lg">check</span>}
+                            </div>
+                          )}
+                          <img
+                            src={avatarUrl}
+                            alt={displayName}
+                            className="w-11 h-11 sm:w-14 sm:h-14 rounded-full flex-shrink-0 object-cover ring-2 ring-slate-100 dark:ring-slate-800"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm sm:text-base font-semibold text-slate-900 dark:text-white truncate">
+                              {displayName}
+                            </p>
+                            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 font-mono mt-0.5 truncate">
+                              {contact.clientPhone.replace(/^(\d{2})(\d{2})(\d{4,5})(\d{4})$/, '+$1 ($2) $3-$4')}
+                            </p>
+                            <div className="flex items-center gap-2 mt-1.5 sm:mt-2 flex-wrap">
+                              <span className="text-[10px] sm:text-xs font-semibold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-full">
+                                {contact.totalAttendances} atend.
+                              </span>
+                              <span className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400">
+                                {new Date(contact.lastContactAt).toLocaleDateString('pt-BR')}
+                              </span>
+                            </div>
+                          </div>
+                          {!contactsBulkSelectMode && (
+                            <div className="sm:hidden flex items-center gap-1.5 flex-shrink-0">
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); handleInitiateConversation(contact.clientPhone); }}
+                                className="flex items-center justify-center w-10 h-10 rounded-xl bg-sky-500 text-white active:bg-sky-600"
+                              >
+                                <span className="material-icons-round text-lg">chat</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  if (!confirm('Excluir este contato? Todos os atendimentos serão removidos.')) return;
+                                  try {
+                                    const result = await contactsService.deleteContact(contact.clientPhone);
+                                    const norm = (p: string) => p.replace(/\D/g, '');
+                                    setContactsList((prev) => prev.filter((c) => norm(c.clientPhone) !== norm(contact.clientPhone)));
+                                    toast.success(result.message);
+                                  } catch (error: any) {
+                                    toast.error(error.response?.data?.error || 'Erro ao excluir contato');
+                                  }
+                                }}
+                                className="flex items-center justify-center w-10 h-10 rounded-xl text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 active:bg-red-100 dark:active:bg-red-900/30"
+                                title="Excluir contato"
+                              >
+                                <span className="material-icons-round text-lg">delete_outline</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        {!contactsBulkSelectMode && (
+                          <div className="hidden sm:flex mt-4 gap-2 flex-shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); handleInitiateConversation(contact.clientPhone); }}
+                              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium text-white bg-sky-500 hover:bg-sky-600 rounded-xl transition-colors"
+                            >
+                              <span className="material-icons-round text-lg">chat</span>
+                              Chamar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (!confirm('Tem certeza que deseja excluir este contato? Todos os atendimentos serão removidos. Esta ação não pode ser desfeita.')) return;
+                                try {
+                                  const result = await contactsService.deleteContact(contact.clientPhone);
+                                  const norm = (p: string) => p.replace(/\D/g, '');
+                                  setContactsList((prev) => prev.filter((c) => norm(c.clientPhone) !== norm(contact.clientPhone)));
+                                  toast.success(result.message);
+                                } catch (error: any) {
+                                  toast.error(error.response?.data?.error || 'Erro ao excluir contato');
+                                }
+                              }}
+                              className="flex items-center justify-center gap-1.5 px-3 py-3 text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-xl transition-colors"
+                              title="Excluir contato"
+                            >
+                              <span className="material-icons-round text-lg">delete_outline</span>
+                              Excluir
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {showImportModal && (
+              <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50" onClick={() => setShowImportModal(false)}>
+                <div
+                  className="bg-white dark:bg-slate-900 rounded-t-2xl sm:rounded-2xl border border-slate-200 dark:border-slate-700 shadow-xl w-full sm:max-w-md p-5 sm:p-6 space-y-4 max-h-[85vh] overflow-y-auto"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">Importar contatos</h3>
+                    <button type="button" onClick={() => setShowImportModal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">
+                      <span className="material-icons-round">close</span>
+                    </button>
+                  </div>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Selecione um arquivo CSV com números de telefone. Colunas aceitas: telefone, phone, numero, celular, whatsapp, fone. Separe por vírgula ou ponto-e-vírgula.
+                  </p>
+                  <a
+                    href="data:text/csv;charset=utf-8,telefone%0A5521999999999%0A5521988888888"
+                    download="modelo-contatos.csv"
+                    className="inline-flex items-center gap-1.5 text-xs text-sky-600 dark:text-sky-400 hover:underline"
+                  >
+                    <span className="material-icons-round text-sm">download</span>
+                    Baixar modelo CSV
+                  </a>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Arquivo CSV</label>
+                    <input
+                      ref={importFileInputRef}
+                      type="file"
+                      accept=".csv"
+                      onChange={(e) => setImportFile(e.target.files?.[0] ?? null)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-white file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-sky-500 file:text-white file:text-sm"
+                    />
+                    {importFile && <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 truncate">{importFile.name}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Número WhatsApp (Baileys)</label>
+                    <select
+                      value={importSelectedNumber}
+                      onChange={(e) => setImportSelectedNumber(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-white focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500"
+                    >
+                      <option value="">Selecione o número...</option>
+                      {baileysNumbers.map((n) => (
+                        <option key={n.id} value={n.id}>
+                          {n.label || n.phoneNumber} ({n.connectionStatus === 'CONNECTED' ? 'Conectado' : 'Desconectado'})
+                        </option>
+                      ))}
+                    </select>
+                    {baileysNumbers.length === 0 && (
+                      <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">Nenhum número Baileys cadastrado. Configure em WhatsApp.</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleImportContacts}
+                    disabled={importLoading || !importFile || !importSelectedNumber || baileysNumbers.length === 0}
+                    className="w-full py-2.5 bg-sky-500 hover:bg-sky-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                  >
+                    {importLoading ? (
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+                    ) : (
+                      <>
+                        <span className="material-icons-round text-base">upload_file</span>
+                        Importar
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Estatísticas section - slides na direção do indicador (vertical desktop, horizontal mobile) */}
+        <div className={`absolute inset-0 w-full min-w-full md:min-w-0 flex flex-col min-h-0 supervisor-tab-panel ${getSupervisorTabSlideClass('estatisticas', activeSupervisorTab)} ${activeSupervisorTab !== 'estatisticas' ? 'pointer-events-none' : 'pointer-events-auto'}`}>
+          <div className="flex-1 min-h-0 min-w-0 overflow-y-auto bg-slate-100 dark:bg-slate-950 relative flex flex-col pb-14 md:pb-0">
             <div
               className="pointer-events-none absolute inset-0 opacity-40 dark:opacity-20"
               style={{
@@ -5042,7 +5794,7 @@ export const SupervisorDashboard: React.FC = () => {
                   'radial-gradient(circle at 20% 20%, rgba(59,130,246,0.08), transparent 35%), radial-gradient(circle at 80% 0%, rgba(15,23,42,0.18), transparent 45%), repeating-linear-gradient(45deg, rgba(15,23,42,0.04) 0 1px, transparent 1px 10px)',
               }}
             />
-            <div className="relative w-full overflow-hidden p-3 sm:p-4 lg:p-5">
+            <div className="relative w-full p-3 sm:p-4 lg:p-5">
               <div className="w-full max-w-7xl mx-auto overflow-hidden space-y-4 sm:space-y-5">
                 <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/80 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4">
                   <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
@@ -5109,26 +5861,26 @@ export const SupervisorDashboard: React.FC = () => {
                     </div>
 
                     {!isLoadingSupervisorStats && (
-                      <div className="flex flex-nowrap items-stretch justify-end gap-3 w-full xl:min-w-[640px]">
-                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px] mr-6 xl:mr-8">
-                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos totais</p>
-                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.totalAttendances ?? 0}</p>
+                      <div className="grid grid-cols-2 sm:flex sm:flex-nowrap items-stretch gap-2 sm:gap-3 w-full xl:min-w-[640px] sm:justify-end">
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px] sm:mr-6 xl:mr-8">
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos totais</p>
+                          <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.totalAttendances ?? 0}</p>
                         </div>
-                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px]">
-                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos hoje</p>
-                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.dayAttendances ?? 0}</p>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px]">
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos hoje</p>
+                          <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{supervisorStats.dayAttendances ?? 0}</p>
                         </div>
-                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px]">
-                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos na semana</p>
-                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{isLoadingWeekAttendances ? '...' : weekAttendances}</p>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px]">
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos na semana</p>
+                          <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{isLoadingWeekAttendances ? '...' : weekAttendances}</p>
                         </div>
-                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px]">
-                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos no mês</p>
-                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{isLoadingMonthAttendances ? '...' : monthAttendances}</p>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px]">
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos no mês</p>
+                          <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{isLoadingMonthAttendances ? '...' : monthAttendances}</p>
                         </div>
-                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm flex-1 min-w-[72px] max-w-[100px] ml-6 xl:ml-8">
-                          <p className="text-xs text-slate-500 dark:text-slate-400">Atendimentos fechados</p>
-                          <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-white">{activeCountBySubdivision['fechados'] ?? 0}</p>
+                        <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-center shadow-sm sm:flex-1 sm:min-w-[72px] sm:max-w-[100px] sm:ml-6 xl:ml-8 col-span-2 sm:col-span-1">
+                          <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 break-words">Atendimentos fechados</p>
+                          <p className="mt-1 text-xl sm:text-2xl font-bold text-slate-900 dark:text-white">{activeCountBySubdivision['fechados'] ?? 0}</p>
                         </div>
                       </div>
                     )}
@@ -5202,9 +5954,10 @@ export const SupervisorDashboard: React.FC = () => {
 
                       <div className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/85 dark:bg-slate-900/70 backdrop-blur-sm shadow-sm p-3 sm:p-4 flex flex-col justify-center">
                         <h3 className="text-sm font-semibold text-slate-900 dark:text-white text-center mb-4">Percentuais por classificação</h3>
-                        <div className="mx-auto w-48 h-48 rounded-full border-8 border-white/60 dark:border-slate-800/80 shadow-sm"
+                        <div className="mx-auto w-48 h-48 rounded-full overflow-hidden border-8 border-slate-200 dark:border-slate-700 shadow-sm relative"
                           style={{
-                            background: classificationChartBackground,
+                            background: `radial-gradient(circle, rgba(0,0,0,0.08) 1px, transparent 1px), ${classificationChartBackground}`,
+                            backgroundSize: '6px 6px, 100% 100%',
                           }}
                         />
                         <div className="mt-5 space-y-2 text-sm">
@@ -5232,8 +5985,11 @@ export const SupervisorDashboard: React.FC = () => {
               </div>
             </div>
           </div>
-        ) : (
-        (isPedidosOrcamentosView || selectedTodasDemandasSubdivision) && selectedQuote ? (
+        </div>
+
+        {/* Chat section - slides na direção do indicador (vertical desktop, horizontal mobile) */}
+        <div className={`absolute inset-0 w-full min-w-full md:min-w-0 flex flex-col min-h-0 md:flex-1 md:min-h-0 supervisor-tab-panel ${getSupervisorTabSlideClass('chat', activeSupervisorTab)} ${activeSupervisorTab !== 'chat' ? 'pointer-events-none' : 'pointer-events-auto'} bg-slate-100 dark:bg-slate-950 pb-14 md:pb-0`}>
+        {(isPedidosOrcamentosView || selectedTodasDemandasSubdivision) && selectedQuote ? (
           <>
           <div className="flex-grow overflow-y-auto p-6 custom-scrollbar min-h-0">
             <button
@@ -5533,11 +6289,28 @@ export const SupervisorDashboard: React.FC = () => {
           )}
           </>
         ) : selectedConversation ? (
-          <>
-            {/* Floating button for sidebar control */}
+          <div className="flex flex-col flex-1 min-h-0 min-w-0 animate-chatPaneEntrance">
+            {/* Mobile header bar with back + info */}
+            <div className="md:hidden flex items-center justify-between px-3 py-2.5 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex-shrink-0">
+              <button
+                onClick={() => { setSelectedConversation(null); setSelectedConversationData(null); setMobileChatLayer('conversations'); }}
+                className="flex items-center gap-1.5 text-sm font-medium text-slate-700 dark:text-slate-300"
+              >
+                <span className="material-icons-round text-lg">arrow_back</span>
+                Voltar
+              </button>
+              <button
+                onClick={() => setMobileCustomerInfoOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 rounded-lg"
+              >
+                <span className="material-icons-round text-base">info</span>
+                Detalhes
+              </button>
+            </div>
+            {/* Floating button for sidebar control - desktop */}
             <button
               onClick={() => setCustomerSidebarOpen(!customerSidebarOpen)}
-              className="absolute top-4 right-4 z-50 p-2 bg-white dark:bg-slate-800 shadow-lg rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+              className="hidden md:block absolute top-4 right-4 z-50 p-2 bg-white dark:bg-slate-800 shadow-lg rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
               title={customerSidebarOpen ? 'Fechar informações do cliente' : 'Abrir informações do cliente'}
             >
               <span className="material-icons-round text-slate-600 dark:text-slate-300">
@@ -5547,20 +6320,31 @@ export const SupervisorDashboard: React.FC = () => {
 
             <div 
               ref={messagesContainerRef}
-              className={`flex-1 overflow-y-auto py-4 custom-scrollbar min-h-0 bg-slate-50 dark:bg-slate-950 ${customerSidebarOpen ? 'px-4' : 'px-6'}`}
+              className={`flex-1 overflow-y-auto py-4 custom-scrollbar min-h-0 bg-slate-50 dark:bg-slate-950 px-3 ${customerSidebarOpen ? 'md:px-4' : 'md:px-6'}`}
               style={{
                 contain: 'layout style paint',
               }}
             >
               {messages.length === 0 ? (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-center">
-                    <span className="material-icons-round text-5xl text-slate-300 mb-3 block">chat_bubble_outline</span>
-                    <p className="text-sm text-slate-400">Nenhuma mensagem ainda</p>
-                  </div>
+                <div className="pt-4 pb-4" style={{ minHeight: 'min(200px, 30vh)' }}>
+                  {isLoadingMessages ? (
+                    <div className="flex items-center gap-3 text-slate-400">
+                      <span className="material-icons-round animate-spin text-xl">refresh</span>
+                      <span className="text-sm">Carregando mensagens...</span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-start gap-2">
+                      <span className="material-icons-round text-4xl text-slate-300">chat_bubble_outline</span>
+                      <p className="text-sm text-slate-400">Nenhuma mensagem ainda</p>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <div className="space-y-3 pb-4" style={{ willChange: 'contents' }}>
+                <div
+                  key={selectedConversation}
+                  className="space-y-1.5 md:space-y-3 pb-4 transition-opacity duration-500 ease-out"
+                  style={{ willChange: 'contents', opacity: chatMessagesFadeIn ? 1 : 0 }}
+                >
                   {hasMoreMessages && (
                     <div className="flex justify-center py-4">
                       <button
@@ -5658,45 +6442,56 @@ export const SupervisorDashboard: React.FC = () => {
 
                       return (
                       <React.Fragment key={key}>
-                    <div className={`flex items-start gap-2.5 ${msg.isClient ? '' : 'flex-row-reverse'}`}>
-                      {/* Show avatar only for first message in group */}
+                    <div className={`flex gap-1 md:gap-2.5 ${msg.isClient ? 'flex-col md:flex-row items-start' : 'flex-col md:flex-row-reverse items-end md:items-start'}`}>
+                      {/* Avatar block: on mobile, label is centered above icon (client and AI) */}
                       {isFirstInGroup ? (
                         msg.isClient ? (
-                          msg.avatar ? (
-                            <img 
-                              alt={msg.sender} 
-                              className="w-9 h-9 rounded-full flex-shrink-0" 
-                              src={msg.avatar} 
-                            />
-                          ) : (
-                            <div 
-                              className="w-9 h-9 bg-orange-500 flex items-center justify-center rounded-full text-[10px] text-white font-medium flex-shrink-0"
-                              style={{ backgroundColor: '#F07000' }}
-                            >
-                              {msg.sender.charAt(0).toUpperCase()}
-                            </div>
-                          )
+                          <div className="flex flex-col items-center md:block">
+                            {isFirstInGroup && (
+                              <span className="text-sm font-medium text-slate-600 dark:text-white mb-1 md:hidden text-center w-full">{msg.sender}</span>
+                            )}
+                            {msg.avatar ? (
+                              <img 
+                                alt={msg.sender} 
+                                className="w-9 h-9 rounded-full flex-shrink-0" 
+                                src={msg.avatar} 
+                              />
+                            ) : (
+                              <div 
+                                className="w-9 h-9 bg-orange-500 flex items-center justify-center rounded-full text-[10px] text-white font-medium flex-shrink-0"
+                                style={{ backgroundColor: '#F07000' }}
+                              >
+                                {msg.sender.charAt(0).toUpperCase()}
+                              </div>
+                            )}
+                          </div>
                         ) : (
-                          <div 
-                            className="w-9 h-9 bg-navy flex items-center justify-center rounded-full text-[10px] text-white font-medium flex-shrink-0" 
-                            style={{ backgroundColor: '#003070' }}
-                          >
-                            {((msg.sender === 'Altese AI' ? 'AI' : msg.sender) || 'AI').substring(0, 2).toUpperCase() || 'AI'}
+                          <div className="flex flex-col items-center md:block">
+                            {/* Mobile: label centered above icon */}
+                            {isFirstInGroup && (
+                              <span className="text-sm font-medium text-slate-600 dark:text-white mb-1 md:hidden text-center w-full">{msg.sender === 'Altese AI' ? 'AI' : msg.sender}</span>
+                            )}
+                            <div 
+                              className="w-9 h-9 bg-navy flex items-center justify-center rounded-full text-[10px] text-white font-medium flex-shrink-0" 
+                              style={{ backgroundColor: '#003070' }}
+                            >
+                              {((msg.sender === 'Altese AI' ? 'AI' : msg.sender) || 'AI').substring(0, 2).toUpperCase() || 'AI'}
+                            </div>
                           </div>
                         )
                       ) : (
-                        // Spacer to maintain alignment when avatar is hidden
-                        <div className="w-9 h-9 flex-shrink-0" />
+                        // Spacer to maintain alignment when avatar is hidden - hidden on mobile to avoid vertical gap
+                        <div className="hidden md:block w-9 h-9 flex-shrink-0" />
                       )}
                       <div className={`flex-1 min-w-0 ${msg.isClient ? '' : 'flex flex-col items-end'}`}>
-                        {/* Show sender name only for first message in group */}
+                        {/* Show sender name only for first message in group - hidden on mobile (shown above icon) */}
                         {isFirstInGroup && (
-                          <div className={`flex items-center gap-1.5 mb-1 ${msg.isClient ? '' : 'flex-row-reverse'}`}>
+                          <div className={`hidden md:flex items-center gap-1.5 mb-1 ${msg.isClient ? '' : 'flex-row-reverse'}`}>
                             <span className="text-sm font-medium text-slate-600 dark:text-white">{msg.sender === 'Altese AI' ? 'AI' : msg.sender}</span>
                           </div>
                         )}
                         <div 
-                          className={`inline-block px-3.5 py-2.5 text-sm leading-relaxed ${customerSidebarOpen ? 'max-w-[85%]' : 'max-w-[90%]'} ${
+                          className={`inline-block px-3.5 py-2.5 text-sm leading-relaxed max-w-[95%] ${customerSidebarOpen ? 'md:max-w-[85%]' : 'md:max-w-[90%]'} ${
                             (() => {
                               const origin = (msg as any).origin || (msg as any).metadata?.origin;
                               if (origin === 'AI') return 'bg-blue-600 dark:bg-orange-500 text-white rounded-2xl rounded-tr-md shadow-sm';
@@ -5832,17 +6627,17 @@ export const SupervisorDashboard: React.FC = () => {
                 </div>
               )}
             </div>
-            <div className={`${customerSidebarOpen ? 'p-4' : 'p-4 pr-6'} bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex-shrink-0`}>
+            <div className={`${customerSidebarOpen ? 'p-4' : 'p-3 md:p-4 pr-4 md:pr-6'} bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex-shrink-0 pb-0 md:pb-4`}>
               {/* Assume/Return Control Banner - Integrated in bottom bar */}
               {selectedConversationData?.handledBy === 'AI' ? (
-                <div className={`${customerSidebarOpen ? 'max-w-4xl mx-auto' : 'w-full'} flex items-center justify-between px-4 py-3 bg-slate-100 dark:bg-slate-800 rounded-xl`}>
+                <div className={`${customerSidebarOpen ? 'max-w-4xl mx-auto' : 'w-full'} flex items-center justify-between px-4 py-3 bg-slate-100 dark:bg-slate-800 rounded-xl animate-assumeBannerShrink`}>
                   <div className="flex items-center space-x-3">
                     <div className={`flex items-center justify-center w-10 h-10 rounded-full ${aiStatus[selectedConversation as string]?.disabled ? 'bg-amber-100 dark:bg-amber-900/30' : 'bg-green-100 dark:bg-green-900/30'}`}>
                       <span className={`material-icons-round text-xl ${aiStatus[selectedConversation as string]?.disabled ? 'text-amber-600 dark:text-amber-400' : 'text-green-600 dark:text-green-400'}`}>
                         {aiStatus[selectedConversation as string]?.disabled ? 'pause_circle' : 'smart_toy'}
                       </span>
                     </div>
-                    <div>
+                    <div className="animate-innerTextFade">
                       <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
                         {aiStatus[selectedConversation as string]?.disabled
                           ? 'IA desativada'
@@ -5891,23 +6686,23 @@ export const SupervisorDashboard: React.FC = () => {
                   </button>
                 </div>
               ) : selectedConversationData?.handledBy === 'HUMAN' ? (
-                <div className={`${customerSidebarOpen ? 'max-w-4xl mx-auto' : 'w-full'} flex items-center justify-between px-4 py-3 bg-slate-100 dark:bg-slate-800 rounded-xl mb-3`}>
-                  <div className="flex items-center space-x-3">
-                    <div className="flex items-center justify-center w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30">
-                      <span className="material-icons-round text-blue-600 dark:text-blue-400 text-xl">person</span>
+                <div className={`${customerSidebarOpen ? 'max-w-4xl mx-auto' : 'w-full'} flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-3 px-3 py-2 md:px-4 md:py-3 bg-slate-100 dark:bg-slate-800 rounded-xl mb-3 animate-assumeBannerGrow`}>
+                  <div className="flex items-center space-x-2 md:space-x-3 min-w-0">
+                    <div className="flex items-center justify-center w-8 h-8 md:w-10 md:h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex-shrink-0">
+                      <span className="material-icons-round text-blue-600 dark:text-blue-400 text-base md:text-xl">person</span>
                     </div>
-                    <div>
-                      <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                        Você está respondendo este atendimento
+                    <div className="min-w-0 flex-1 animate-innerTextFade">
+                      <p className="text-xs md:text-sm font-semibold text-slate-700 dark:text-slate-200 leading-tight">
+                        Você está respondendo
                       </p>
-                      <div className="flex items-center space-x-2">
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          A IA continuará armazenando o contexto da conversa
-                        </p>
+                      <p className="text-[10px] md:text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-tight">
+                        IA armazena o contexto
+                      </p>
+                      <div className="min-h-[1.25rem] mt-0.5 flex items-center">
                         {selectedConversation && inactivityTimer[selectedConversation as string] !== undefined && inactivityTimer[selectedConversation as string] > 0 && !aiStatus[selectedConversation as string]?.disabled && (
-                          <span className="text-xs font-semibold text-orange-600 dark:text-orange-400">
-                            • Devolve em: {formatTimer(inactivityTimer[selectedConversation as string])}
-                          </span>
+                          <p className="text-[10px] md:text-xs font-semibold text-orange-600 dark:text-orange-400 leading-tight">
+                            Devolve em: {formatTimer(inactivityTimer[selectedConversation as string])}
+                          </p>
                         )}
                       </div>
                     </div>
@@ -5919,8 +6714,6 @@ export const SupervisorDashboard: React.FC = () => {
                       setIsReturningToAI(true);
                       try {
                         await attendanceService.returnAttendanceToAI(selectedConversation as string);
-                        
-                        // Update local state optimistically
                         setSelectedConversationData({
                           ...selectedConversationData,
                           handledBy: 'AI',
@@ -5932,8 +6725,6 @@ export const SupervisorDashboard: React.FC = () => {
                               : conv
                           )
                         );
-                        
-                        // Clear inactivity timer
                         if (inactivityTimerIntervalRef.current[selectedConversation as string]) {
                           clearInterval(inactivityTimerIntervalRef.current[selectedConversation as string]);
                           delete inactivityTimerIntervalRef.current[selectedConversation as string];
@@ -5943,11 +6734,9 @@ export const SupervisorDashboard: React.FC = () => {
                           delete updated[selectedConversation as string];
                           return updated;
                         });
-                        
                         toast.success('Atendimento devolvido para IA');
                       } catch (error: any) {
                         console.error('Error returning attendance to AI:', error);
-                        
                         // Check if it's a network error
                         if (error.code === 'ERR_NETWORK' || error.message?.includes('Network Error')) {
                           toast.error('Erro de conexão. Verifique sua internet e tente novamente.');
@@ -5961,7 +6750,7 @@ export const SupervisorDashboard: React.FC = () => {
                       }
                     }}
                     disabled={isReturningToAI || !selectedConversation}
-                    className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-all text-sm font-medium shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center justify-center space-x-2 px-3 py-2 md:px-4 md:py-2.5 w-full md:w-auto bg-green-600 text-white rounded-lg hover:bg-green-700 transition-all text-xs md:text-sm font-medium shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                   >
                     {isReturningToAI ? (
                       <>
@@ -5980,11 +6769,11 @@ export const SupervisorDashboard: React.FC = () => {
               
               {/* Message input area - only show when human is handling. Shift+Enter = quebra linha, Enter = enviar */}
               {selectedConversationData?.handledBy === 'HUMAN' && (
-                <div className={`${customerSidebarOpen ? 'max-w-4xl mx-auto' : 'w-full'} flex items-center space-x-4 bg-slate-100 dark:bg-slate-800 p-2 rounded-xl`}>
+                <div className={`${customerSidebarOpen ? 'max-w-4xl mx-auto' : 'w-full'} flex items-center gap-2 sm:gap-4 bg-slate-100 dark:bg-slate-800 p-2 md:p-3 rounded-xl`}>
                   <textarea
                     ref={chatMessageTextareaRef}
-                    className="flex-grow min-h-[40px] resize-none bg-transparent border-none focus:ring-0 text-sm px-2 py-2 outline-none overflow-hidden text-slate-900 dark:text-white"
-                    placeholder="Digite sua mensagem... (Shift+Enter para quebrar linha)"
+                    className="flex-grow min-h-[36px] md:min-h-[44px] max-h-[120px] resize-none bg-transparent border-none focus:ring-0 text-sm px-2 py-1.5 md:py-2 outline-none overflow-hidden text-slate-900 dark:text-white placeholder-slate-400 leading-normal"
+                    placeholder=""
                     rows={1}
                     style={{ maxHeight: 200 }}
                     value={messageInput}
@@ -6013,7 +6802,7 @@ export const SupervisorDashboard: React.FC = () => {
                     }}
                     disabled={!selectedConversation || !!pastedImage}
                   />
-                  <div className="flex items-center space-x-2 text-slate-500 relative">
+                  <div className="flex items-center justify-center gap-1 md:gap-2 text-slate-500 relative flex-shrink-0">
                     {pastedImage && (
                       <div className="flex items-center gap-2 mr-2">
                         <div className="relative w-10 h-10 rounded overflow-hidden border border-slate-200 dark:border-slate-700">
@@ -6042,21 +6831,21 @@ export const SupervisorDashboard: React.FC = () => {
                       disabled={!selectedConversation}
                     />
                     <button 
-                      className="hover:text-navy transition-colors disabled:opacity-50 p-2" 
+                      className="hover:text-navy transition-colors disabled:opacity-50 p-1.5 md:p-2 flex items-center justify-center" 
                       disabled={!selectedConversation}
                       onClick={() => setShowAudioRecorder(true)}
                       title="Gravar áudio"
                     >
-                      <span className="material-icons-round">mic</span>
+                      <span className="material-icons-round text-xl">mic</span>
                     </button>
                     <div className="relative" ref={emojiPickerRef}>
                       <button 
-                        className="hover:text-navy transition-colors disabled:opacity-50 p-2" 
+                        className="hover:text-navy transition-colors disabled:opacity-50 p-1.5 md:p-2 flex items-center justify-center" 
                         disabled={!selectedConversation}
                         onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                         title="Emojis"
                       >
-                        <span className="material-icons-round">sentiment_satisfied</span>
+                        <span className="material-icons-round text-xl">sentiment_satisfied</span>
                       </button>
                       {showEmojiPicker && (
                         <EmojiPicker
@@ -6067,7 +6856,7 @@ export const SupervisorDashboard: React.FC = () => {
                     </div>
                   </div>
                   <button
-                    className="bg-navy text-white p-2 rounded-lg hover:bg-navy/90 transition-transform active:scale-95 flex items-center justify-center"
+                    className="bg-navy text-white p-1.5 md:p-2 rounded-lg hover:bg-navy/90 transition-transform active:scale-95 flex items-center justify-center flex-shrink-0 min-w-[36px] min-h-[36px] md:min-w-[40px] md:min-h-[40px]"
                     style={{ backgroundColor: '#003070' }}
                     onClick={async () => {
                       if (pastedImage && selectedConversation) {
@@ -6090,7 +6879,7 @@ export const SupervisorDashboard: React.FC = () => {
                 onCancel={() => setShowAudioRecorder(false)}
               />
             )}
-          </>
+          </div>
         ) : (isPedidosOrcamentosView || selectedTodasDemandasSubdivision) && !selectedQuote ? (
           <div className="flex-grow overflow-y-auto p-6 flex items-center justify-center bg-slate-100 dark:bg-slate-950">
             <div className="text-center max-w-md">
@@ -6118,16 +6907,18 @@ export const SupervisorDashboard: React.FC = () => {
             </div>
           </div>
         )
-      )}
+        }
+        </div>
       </main>
+      </div>
 
-      {/* Customer Info Sidebar */}
+      {/* Customer Info Sidebar - transição suave; w-0 ao fechar evita buraco; entrada animada ao abrir */}
       {activeSupervisorTab === 'chat' && selectedConversation && (
         <aside 
-          className={`bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 overflow-y-auto custom-scrollbar flex-shrink-0 transition-all duration-300 ease-in-out dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200 ${
+          className={`hidden md:block bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 overflow-y-auto custom-scrollbar flex-shrink-0 transition-all duration-300 ease-in-out dark:[&_.text-slate-400]:text-slate-300 dark:[&_.text-slate-500]:text-slate-300 dark:[&_.text-slate-600]:text-slate-200 ${
             customerSidebarOpen 
-              ? 'w-80 translate-x-0 opacity-100' 
-              : 'w-0 translate-x-full opacity-0 pointer-events-none overflow-hidden'
+              ? 'w-80 translate-x-0 opacity-100 animate-sidebarPaneEntrance' 
+              : 'w-0 min-w-0 translate-x-full opacity-0 pointer-events-none overflow-hidden'
           }`}
         >
             <div className="p-6 text-center border-b border-slate-100 dark:border-slate-800">
@@ -6156,6 +6947,10 @@ export const SupervisorDashboard: React.FC = () => {
               )}
             </div>
             <div className="p-6 space-y-4">
+              <div
+                className="transition-opacity duration-500 ease-out space-y-5"
+                style={{ opacity: sidebarDetailsReady ? 1 : 0 }}
+              >
               <div className="flex items-center justify-between text-xs">
                 <div className="flex items-center space-x-3 text-slate-500 dark:text-slate-200">
                   <div className="p-1.5 bg-green-50 dark:bg-green-900/20 rounded-md">
@@ -6193,22 +6988,15 @@ export const SupervisorDashboard: React.FC = () => {
                   {selectedConversationData?.handledBy === 'AI' ? 'IA' : 'Humano'}
                 </span>
               </div>
-              {selectedConversationData?.vehicleBrand && (
+              {selectedConversationData?.clientPhone && (
                 <div className="flex items-center justify-between text-xs">
-                  <div className="flex items-center space-x-3 text-slate-500">
-                    <div className="p-1.5 bg-purple-50 dark:bg-purple-900/20 rounded-md">
-                      <span className="material-icons-round text-purple-500 text-sm">directions_car</span>
+                  <div className="flex items-center space-x-3 text-slate-500 dark:text-slate-200">
+                    <div className="p-1.5 bg-slate-100 dark:bg-slate-800 rounded-md">
+                      <span className="material-icons-round text-slate-600 dark:text-slate-400 text-sm">phone</span>
                     </div>
-                    <span className="font-medium">Marca:</span>
+                    <span className="font-medium text-slate-700 dark:text-white">Telefone:</span>
                   </div>
-                  <span className="font-bold">
-                    {selectedConversationData.vehicleBrand === 'FORD' ? 'Ford' :
-                     selectedConversationData.vehicleBrand === 'GM' ? 'GM' :
-                     selectedConversationData.vehicleBrand === 'VW' ? 'Volkswagen' :
-                     selectedConversationData.vehicleBrand === 'FIAT' ? 'Fiat' :
-                     selectedConversationData.vehicleBrand === 'IMPORTADOS' ? 'Importados' :
-                     selectedConversationData.vehicleBrand}
-                  </span>
+                  <span className="font-bold text-slate-700 dark:text-slate-100">{formatPhoneNumber(selectedConversationData.clientPhone)}</span>
                 </div>
               )}
               <div className="flex items-center justify-between text-xs">
@@ -6245,13 +7033,14 @@ export const SupervisorDashboard: React.FC = () => {
                     const created = new Date(selectedConversationData.createdAt);
                     const now = new Date();
                     const diffMs = now.getTime() - created.getTime();
-                    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                    const diffDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
                     
                     if (diffDays === 0) return 'Hoje';
                     if (diffDays === 1) return 'Há 1 dia';
                     return `Há ${diffDays} dias`;
                   })() : 'N/A'}
                 </span>
+              </div>
               </div>
               <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
                 <div className="flex items-center space-x-2 mb-3">
@@ -6369,27 +7158,29 @@ export const SupervisorDashboard: React.FC = () => {
                 </button>
               )}
               
-              {/* Botão Excluir Contato */}
+              {/* Botão Excluir Contato - exclui TODOS os atendimentos e contato importado pelo telefone */}
               <button
                 onClick={async () => {
-                  if (!selectedConversation) return;
+                  if (!selectedConversation || !selectedConversationData?.clientPhone) return;
                   
-                  if (!confirm('Tem certeza que deseja excluir este contato? Esta ação não pode ser desfeita.')) {
+                  if (!confirm('Tem certeza que deseja excluir este contato? Todos os atendimentos serão removidos. Esta ação não pode ser desfeita.')) {
                     return;
                   }
 
                   try {
-                    await attendanceService.deleteAttendance(selectedConversation as string);
+                    await contactsService.deleteContact(selectedConversationData.clientPhone);
                     // Remove from conversations list
                     setConversations((prev) => prev.filter(c => c.id !== selectedConversation));
                     // Clear selected conversation
                     setSelectedConversation(null);
                     setSelectedConversationData(null);
                     setMessages([]);
-                    // Show success message
+                    // Atualizar lista de contatos (para quando voltar à aba Contatos)
+                    const contacts = await contactsService.listContacts();
+                    setContactsList(contacts);
                     toast.success('Contato excluído com sucesso');
                   } catch (error: any) {
-                    console.error('Error deleting attendance:', error);
+                    console.error('Error deleting contact:', error);
                     toast.error(error.response?.data?.error || 'Erro ao excluir contato');
                   }
                 }}
@@ -6401,6 +7192,155 @@ export const SupervisorDashboard: React.FC = () => {
             </div>
         </aside>
       )}
+
+      {/* Mobile Customer Info Overlay */}
+      {activeSupervisorTab === 'chat' && selectedConversation && mobileCustomerInfoOpen && (
+        <div className="md:hidden fixed inset-0 z-50 bg-black/50" onClick={() => setMobileCustomerInfoOpen(false)}>
+          <div
+            className="absolute inset-x-0 bottom-0 max-h-[85vh] bg-white dark:bg-slate-900 rounded-t-2xl overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-center justify-between px-5 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 z-10">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">Detalhes do cliente</h3>
+              <button type="button" onClick={() => setMobileCustomerInfoOpen(false)} className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">
+                <span className="material-icons-round">close</span>
+              </button>
+            </div>
+            <div className="p-5 text-center border-b border-slate-100 dark:border-slate-800">
+              <div
+                className="w-14 h-14 bg-orange-500 flex items-center justify-center rounded-full mx-auto mb-3 text-white text-xl font-bold"
+                style={{ backgroundColor: '#F07000' }}
+              >
+                {(selectedConversationData?.clientName || selectedConvName || 'C').charAt(0).toUpperCase()}
+              </div>
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                {selectedConversationData?.clientName || selectedConvName || 'Cliente'}
+              </h3>
+              {selectedConversationData?.clientPhone && (
+                <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">{formatPhoneNumber(selectedConversationData.clientPhone)}</p>
+              )}
+            </div>
+            <div className="p-5 space-y-4">
+              <div
+                className="transition-opacity duration-500 ease-out space-y-5"
+                style={{ opacity: sidebarDetailsReady ? 1 : 0 }}
+              >
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium text-slate-700 dark:text-white">Status:</span>
+                <span className="font-bold text-slate-700 dark:text-slate-100">
+                  {selectedConversationData?.state === 'OPEN' ? 'Aberto' : selectedConversationData?.state === 'IN_PROGRESS' ? 'Em Andamento' : selectedConversationData?.state === 'FINISHED' ? 'Finalizado' : 'Ativo'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium text-slate-700 dark:text-white">Atendido por:</span>
+                <span className="font-bold text-slate-700 dark:text-slate-100">{selectedConversationData?.handledBy === 'AI' ? 'IA' : 'Humano'}</span>
+              </div>
+              {selectedConversationData?.clientPhone && (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-slate-700 dark:text-white">Telefone:</span>
+                  <span className="font-bold text-slate-700 dark:text-slate-100">{formatPhoneNumber(selectedConversationData.clientPhone)}</span>
+                </div>
+              )}
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-medium text-slate-700 dark:text-white">Último contato:</span>
+                <span className="font-bold text-slate-700 dark:text-slate-100">
+                  {selectedConversationData?.lastMessageTime ? (() => {
+                    const d = new Date(selectedConversationData.lastMessageTime);
+                    const diff = Math.floor((Date.now() - d.getTime()) / 60000);
+                    return diff < 60 ? `${diff}min` : diff < 1440 ? `${Math.floor(diff / 60)}h` : `${Math.floor(diff / 1440)}d`;
+                  })() : 'N/A'}
+                </span>
+              </div>
+              </div>
+              {selectedConversationData?.interventionData && Object.keys(selectedConversationData.interventionData).length > 0 && (
+                <div className="pt-3 border-t border-slate-200 dark:border-slate-700 space-y-2">
+                  <span className="text-xs font-medium text-slate-700 dark:text-slate-300">Informações coletadas</span>
+                  {Object.entries(selectedConversationData.interventionData).map(([key, value]) => {
+                    const label = INTERVENTION_DATA_LABELS[key] ?? key.replace(/_/g, ' ').replace(/-/g, ' ');
+                    return (
+                      <div key={key} className="flex flex-col text-xs">
+                        <span className="text-slate-500 dark:text-slate-400">{label}</span>
+                        <span className="text-slate-900 dark:text-white font-bold break-words">{String(value ?? '—')}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="px-5 pb-6 space-y-2">
+              {selectedConversationData?.state !== 'FINISHED' && (
+                <>
+                  <button
+                    onClick={async () => {
+                      if (!selectedConversation) return;
+                      const convId = selectedConversation as string;
+                      const isDisabled = aiStatus[convId]?.disabled;
+                      try {
+                        if (isDisabled) {
+                          await attendanceService.enableAI(convId);
+                          setAiStatus((prev) => ({ ...prev, [convId]: { disabled: false } }));
+                          toast.success('IA reativada');
+                        } else {
+                          await attendanceService.disableAI(convId);
+                          setAiStatus((prev) => ({ ...prev, [convId]: { disabled: true } }));
+                          toast.success('IA desligada');
+                        }
+                      } catch (err: any) {
+                        toast.error(err.response?.data?.error || 'Erro');
+                      }
+                      setMobileCustomerInfoOpen(false);
+                    }}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400"
+                  >
+                    <span className="material-icons-round text-sm">{aiStatus[selectedConversation as string]?.disabled ? 'smart_toy' : 'block'}</span>
+                    {aiStatus[selectedConversation as string]?.disabled ? 'Ligar IA' : 'Desligar IA'}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!selectedConversation || !confirm('Fechar atendimento?')) return;
+                      try {
+                        await attendanceService.closeAttendance(selectedConversation as string);
+                        toast.success('Atendimento fechado');
+                        setMobileCustomerInfoOpen(false);
+                      } catch (err: any) {
+                        toast.error(err.response?.data?.error || 'Erro');
+                      }
+                    }}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400"
+                  >
+                    <span className="material-icons-round text-sm">close</span>
+                    Fechar Atendimento
+                  </button>
+                </>
+              )}
+              <button
+                onClick={async () => {
+                  if (!selectedConversation || !selectedConversationData?.clientPhone || !confirm('Excluir contato? Todos os atendimentos serão removidos.')) return;
+                  try {
+                    await contactsService.deleteContact(selectedConversationData.clientPhone);
+                    setConversations((prev) => prev.filter((c) => c.id !== selectedConversation));
+                    setSelectedConversation(null);
+                    setSelectedConversationData(null);
+                    setMessages([]);
+                    setMobileCustomerInfoOpen(false);
+                    setMobileChatLayer('conversations');
+                    const contacts = await contactsService.listContacts();
+                    setContactsList(contacts);
+                    toast.success('Contato excluído');
+                  } catch (err: any) {
+                    toast.error(err.response?.data?.error || 'Erro');
+                  }
+                }}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400"
+              >
+                <span className="material-icons-round text-sm">delete</span>
+                Excluir Contato
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showFullContactHistoryModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="bg-white dark:bg-slate-900 rounded-xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col">

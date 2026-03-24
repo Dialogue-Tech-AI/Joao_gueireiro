@@ -19,6 +19,8 @@ export enum AttendanceType {
 }
 
 export enum OperationalState {
+  /** Atendimento criado via Chamar (Contatos) - aguardando primeira mensagem enviada; não aparece em subdivisões. */
+  AGUARDANDO_PRIMEIRA_MSG = 'AGUARDANDO_PRIMEIRA_MSG',
   TRIAGEM = 'TRIAGEM',
   ABERTO = 'ABERTO',
   EM_ATENDIMENTO = 'EM_ATENDIMENTO',

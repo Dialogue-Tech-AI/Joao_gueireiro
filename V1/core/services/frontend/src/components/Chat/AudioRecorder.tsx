@@ -1,5 +1,28 @@
 import React, { useState, useRef, useEffect } from 'react';
 
+/** Detecta o MIME type de áudio suportado pelo navegador (iOS Safari usa audio/mp4, Chrome/Firefox usa audio/webm) */
+function getSupportedAudioMimeType(): string {
+  if (typeof MediaRecorder === 'undefined') return 'audio/webm';
+
+  const types = [
+    'audio/mp4',   // iOS Safari (prioridade)
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+  ];
+  for (const type of types) {
+    try {
+      if (MediaRecorder.isTypeSupported?.(type)) return type;
+    } catch {
+      continue;
+    }
+  }
+  // Fallback: iOS/Safari usa audio/mp4; outros usam audio/webm
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  return isIOS ? 'audio/mp4' : 'audio/webm';
+}
+
 interface AudioRecorderProps {
   onRecordingComplete: (audioBlob: Blob) => void;
   onCancel: () => void;
@@ -11,6 +34,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const mimeTypeRef = useRef<string>('audio/webm');
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -28,7 +52,16 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      const mimeType = getSupportedAudioMimeType();
+      mimeTypeRef.current = mimeType;
+
+      let mediaRecorder: MediaRecorder;
+      try {
+        mediaRecorder = new MediaRecorder(stream, { mimeType });
+      } catch {
+        mediaRecorder = new MediaRecorder(stream);
+        mimeTypeRef.current = mediaRecorder.mimeType || 'audio/webm';
+      }
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -39,13 +72,14 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({ onRecordingComplet
       };
 
       mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const actualType = mediaRecorder.mimeType || mimeTypeRef.current;
+        const audioBlob = new Blob(audioChunksRef.current, { type: actualType });
         setAudioBlob(audioBlob);
-        // Stop all tracks
         stream.getTracks().forEach(track => track.stop());
       };
 
-      mediaRecorder.start();
+      // Safari/iOS: start(timeslice) ajuda a garantir que ondataavailable dispare
+      mediaRecorder.start(1000);
       setIsRecording(true);
       setRecordingTime(0);
 

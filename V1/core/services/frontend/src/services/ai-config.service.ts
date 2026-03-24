@@ -579,6 +579,51 @@ AIConfigService.prototype.updateSubdivisionInactivityTimeouts = async function(t
 };
 
 /**
+ * Follow-up configuration for inactive attendances
+ */
+export interface FollowUpConfig {
+  firstDelayMinutes: number;
+  secondDelayMinutes: number;
+  closeDelayMinutes: number;
+  firstMessage: string;
+  secondMessage: string;
+}
+
+AIConfigService.prototype.getFollowUpConfig = async function(): Promise<FollowUpConfig> {
+  const response = await api.get<{ success: boolean; data: FollowUpConfig }>('/ai/config/follow-up-config');
+  return response.data.data;
+};
+
+AIConfigService.prototype.updateFollowUpConfig = async function(config: FollowUpConfig): Promise<{ success: boolean; updatedAt: Date }> {
+  const response = await api.put<{ success: boolean; data: { success: boolean; updatedAt: Date } }>(
+    '/ai/config/follow-up-config',
+    config
+  );
+  return response.data.data;
+};
+
+/**
+ * Configuração de movimentação automática entre divisões (não sobre envio de mensagens)
+ */
+export interface FollowUpMovementConfig {
+  moveOpenToFirstFollowUpMinutes: number;
+  moveToFechadosAfterSecondFollowUpMinutes: number;
+}
+
+AIConfigService.prototype.getFollowUpMovementConfig = async function(): Promise<FollowUpMovementConfig> {
+  const response = await api.get<{ success: boolean; data: FollowUpMovementConfig }>('/ai/config/follow-up-movement-config');
+  return response.data.data;
+};
+
+AIConfigService.prototype.updateFollowUpMovementConfig = async function(config: FollowUpMovementConfig): Promise<{ success: boolean; updatedAt: Date }> {
+  const response = await api.put<{ success: boolean; data: { success: boolean; updatedAt: Date } }>(
+    '/ai/config/follow-up-movement-config',
+    config
+  );
+  return response.data.data;
+};
+
+/**
  * Blacklist: números que não são respondidos pela IA e não aparecem como atendimentos.
  */
 export interface BlacklistConfig {

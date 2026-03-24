@@ -220,6 +220,7 @@ export class AIInternalController {
       if (!message) {
         const fallbackAttendance = await attendanceRepo.findOne({
           where: [
+            { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.AGUARDANDO_PRIMEIRA_MSG },
             { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.TRIAGEM },
             { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.ABERTO },
             { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.EM_ATENDIMENTO },

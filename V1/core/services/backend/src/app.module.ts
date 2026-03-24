@@ -2,6 +2,7 @@ import { Application } from 'express';
 import { AuthController } from './modules/auth/presentation/controllers/auth.controller';
 import { UserAdminController } from './modules/auth/presentation/controllers/user-admin.controller';
 import { WhatsAppAdminController } from './modules/whatsapp/presentation/controllers/whatsapp-admin.controller';
+import { ContactsController } from './modules/whatsapp/presentation/controllers/contacts.controller';
 import { AttendanceController } from './modules/attendance/presentation/controllers/attendance.controller';
 import { MediaController } from './modules/message/presentation/controllers/media.controller';
 import { AIInternalController } from './modules/ai/presentation/controllers/ai-internal.controller';
@@ -15,6 +16,7 @@ import { BibliotecaController } from './modules/ai/presentation/controllers/bibl
 import notificationRoutes from './modules/notification/presentation/routes/notification.routes';
 import { QuoteRequestController } from './modules/quote/presentation/controllers/quote-request.controller';
 import { authMiddleware } from './shared/presentation/middlewares/auth.middleware';
+import { requireSupervisor } from './shared/presentation/middlewares/permission.middleware';
 import { errorHandlerMiddleware } from './shared/presentation/middlewares/error-handler.middleware';
 import { logger } from './shared/utils/logger';
 
@@ -22,6 +24,7 @@ export class AppModule {
   private authController: AuthController;
   private userAdminController: UserAdminController;
   private whatsappAdminController: WhatsAppAdminController;
+  private contactsController: ContactsController;
   private attendanceController: AttendanceController;
   private mediaController: MediaController;
   private aiInternalController: AIInternalController;
@@ -38,6 +41,7 @@ export class AppModule {
     this.authController = new AuthController();
     this.userAdminController = new UserAdminController();
     this.whatsappAdminController = new WhatsAppAdminController();
+    this.contactsController = new ContactsController();
     this.attendanceController = new AttendanceController();
     this.mediaController = new MediaController();
     this.aiInternalController = new AIInternalController();
@@ -62,6 +66,8 @@ export class AppModule {
 
     // WhatsApp routes (webhook is public, admin routes require auth)
     this.app.use('/api/whatsapp', this.whatsappAdminController.router);
+
+    this.app.use('/api/contacts', authMiddleware, requireSupervisor, this.contactsController.router);
 
     // Attendance routes (require auth)
     this.app.use('/api/attendances', authMiddleware, this.attendanceController.router);
