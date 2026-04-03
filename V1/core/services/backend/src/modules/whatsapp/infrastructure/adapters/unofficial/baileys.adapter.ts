@@ -44,6 +44,9 @@ export class BaileysAdapter implements IWhatsAppAdapter {
   private saveCredsWithState: ((creds: any) => Promise<void>) | null = null;
   private authState: { creds: any; keys: any } | null = null;
   private chatEphemeralCache: Map<string, number> = new Map();
+  /** Presença global `unavailable` em ciclo — doc Baileys: favorece notificações no telefone ligado enquanto o Baileys está conectado */
+  private phoneNotificationPresenceInterval: ReturnType<typeof setInterval> | null = null;
+  private static readonly PHONE_NOTIFICATION_PRESENCE_MS = 45_000;
 
   constructor(config: BaileysConfig) {
     this.numberId = config.numberId;
@@ -57,6 +60,8 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
   async connect(): Promise<{ qrCode?: string; status: string }> {
     try {
+      this.stopPhoneNotificationPresenceLoop();
+
       logger.info('Connecting to WhatsApp via Baileys', {
         numberId: this.numberId,
       });
@@ -201,6 +206,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
         this.connected = false;
         this.qrCode = null;
+        this.stopPhoneNotificationPresenceLoop();
 
         if (shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
@@ -231,7 +237,9 @@ export class BaileysAdapter implements IWhatsAppAdapter {
         this.connected = true;
         this.qrCode = null;
         this.reconnectAttempts = 0;
-        
+
+        this.startPhoneNotificationPresenceLoop();
+
         // Log that connection is established and ready to receive messages
         logger.info('WhatsApp connection established and ready to receive messages', {
           numberId: this.numberId,
@@ -1149,6 +1157,8 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
   async disconnect(): Promise<void> {
     try {
+      this.stopPhoneNotificationPresenceLoop();
+
       logger.info('Disconnecting WhatsApp', {
         numberId: this.numberId,
       });
@@ -1192,19 +1202,43 @@ export class BaileysAdapter implements IWhatsAppAdapter {
 
   /**
    * Multi-dispositivo: com a sessão Baileys a parecer “online”, o WhatsApp pode suprimir notificações no telefone ligado.
-   * Enviar presença global `unavailable` (sem JID) alinha com a doc Baileys e favorece notificações no aparelho para mensagens seguintes.
+   * Enviar presença global `unavailable` (sem JID) alinha com a doc Baileys e favorece notificações no aparelho.
    */
   private async markPresenceUnavailableForPhoneNotifications(): Promise<void> {
     if (!this.socket || !this.connected) return;
     try {
       await this.socket.sendPresenceUpdate('unavailable');
-      logger.debug('Presence unavailable (socket) — favorece notificações no telefone após envio', {
+      logger.debug('Presence unavailable (socket) — notificações no telefone', {
         numberId: this.numberId,
       });
     } catch (e: any) {
       logger.debug('markPresenceUnavailableForPhoneNotifications failed', {
         numberId: this.numberId,
         error: e?.message,
+      });
+    }
+  }
+
+  /** Ciclo contínuo enquanto conectado: a doc Baileys recomenda unavailable “de vez em quando” para o telefone receber notificações. */
+  private startPhoneNotificationPresenceLoop(): void {
+    this.stopPhoneNotificationPresenceLoop();
+    if (!this.socket || !this.connected) return;
+    void this.markPresenceUnavailableForPhoneNotifications();
+    this.phoneNotificationPresenceInterval = setInterval(() => {
+      void this.markPresenceUnavailableForPhoneNotifications();
+    }, BaileysAdapter.PHONE_NOTIFICATION_PRESENCE_MS);
+    logger.info('Ciclo de presença para notificações no telefone iniciado', {
+      numberId: this.numberId,
+      intervalMs: BaileysAdapter.PHONE_NOTIFICATION_PRESENCE_MS,
+    });
+  }
+
+  private stopPhoneNotificationPresenceLoop(): void {
+    if (this.phoneNotificationPresenceInterval !== null) {
+      clearInterval(this.phoneNotificationPresenceInterval);
+      this.phoneNotificationPresenceInterval = null;
+      logger.debug('Ciclo de presença para notificações no telefone parado', {
+        numberId: this.numberId,
       });
     }
   }
