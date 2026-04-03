@@ -1190,6 +1190,25 @@ export class BaileysAdapter implements IWhatsAppAdapter {
     return `${cleanPhone}@s.whatsapp.net`;
   }
 
+  /**
+   * Multi-dispositivo: com a sessão Baileys a parecer “online”, o WhatsApp pode suprimir notificações no telefone ligado.
+   * Enviar presença global `unavailable` (sem JID) alinha com a doc Baileys e favorece notificações no aparelho para mensagens seguintes.
+   */
+  private async markPresenceUnavailableForPhoneNotifications(): Promise<void> {
+    if (!this.socket || !this.connected) return;
+    try {
+      await this.socket.sendPresenceUpdate('unavailable');
+      logger.debug('Presence unavailable (socket) — favorece notificações no telefone após envio', {
+        numberId: this.numberId,
+      });
+    } catch (e: any) {
+      logger.debug('markPresenceUnavailableForPhoneNotifications failed', {
+        numberId: this.numberId,
+        error: e?.message,
+      });
+    }
+  }
+
   async sendTyping(to: string, isTyping: boolean): Promise<void> {
     if (!this.connected || !this.socket) {
       logger.warn('Cannot send typing indicator - WhatsApp is not connected', {
@@ -1251,6 +1270,8 @@ export class BaileysAdapter implements IWhatsAppAdapter {
         { text: finalMessage },
         ephemeralExpiration ? { ephemeralExpiration } : undefined,
       );
+
+      await this.markPresenceUnavailableForPhoneNotifications();
 
       logger.info('WhatsApp message sent successfully', {
         numberId: this.numberId,
@@ -1327,6 +1348,8 @@ export class BaileysAdapter implements IWhatsAppAdapter {
           fileName: caption || 'document',
         }, sendOpts);
       }
+
+      await this.markPresenceUnavailableForPhoneNotifications();
 
       logger.info('WhatsApp media sent successfully', {
         numberId: this.numberId,
