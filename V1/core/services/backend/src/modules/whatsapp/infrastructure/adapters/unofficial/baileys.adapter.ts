@@ -46,7 +46,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
   private chatEphemeralCache: Map<string, number> = new Map();
   /** Presença global `unavailable` em ciclo — doc Baileys: favorece notificações no telefone ligado enquanto o Baileys está conectado */
   private phoneNotificationPresenceInterval: ReturnType<typeof setInterval> | null = null;
-  private static readonly PHONE_NOTIFICATION_PRESENCE_MS = 45_000;
+  private static readonly PHONE_NOTIFICATION_PRESENCE_MS = 15_000;
 
   constructor(config: BaileysConfig) {
     this.numberId = config.numberId;
