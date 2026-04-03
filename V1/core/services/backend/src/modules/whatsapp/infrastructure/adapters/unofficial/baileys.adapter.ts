@@ -90,6 +90,13 @@ export class BaileysAdapter implements IWhatsAppAdapter {
         },
       });
 
+      // Nunca enviar recibos de leitura (ticks azuis). Qualquer chamada a readMessages() vira no-op.
+      this.socket.readMessages = async () => {
+        logger.debug('readMessages ignorado — sessão não marca mensagens como visualizadas no WhatsApp', {
+          numberId: this.numberId,
+        });
+      };
+
       // Set up event handlers
       this.setupEventHandlers();
 
@@ -1196,8 +1203,9 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       // Format phone number to JID format
       const jid = this.formatPhoneToJid(to);
       
-      // Send presence update: 'composing' for typing, 'available' to stop
-      await this.socket.sendPresenceUpdate(isTyping ? 'composing' : 'available', jid);
+      // Chat-level: 'composing' | 'paused' | 'recording'. NÃO usar 'available' com JID — no Baileys isso
+      // cai na presença global, liga isOnline e reativa recibos “ativos” (efeito colateral indesejado).
+      await this.socket.sendPresenceUpdate(isTyping ? 'composing' : 'paused', jid);
 
       logger.debug('Typing indicator sent', {
         numberId: this.numberId,
