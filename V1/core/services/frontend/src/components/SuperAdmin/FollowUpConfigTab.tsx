@@ -42,8 +42,68 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
           </div>
         ) : (
           <div className="space-y-6">
+            <div
+              className="flex items-center justify-between p-4 rounded-lg border border-slate-200 dark:border-slate-700"
+              style={{ backgroundColor: followUpConfig.enabled ? '#F0FDF4' : '#FEF2F2' }}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div
+                  className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+                  style={{ backgroundColor: followUpConfig.enabled ? '#DCFCE7' : '#FEE2E2' }}
+                >
+                  <span
+                    className="material-icons-outlined"
+                    style={{ color: followUpConfig.enabled ? '#16A34A' : '#DC2626' }}
+                  >
+                    {followUpConfig.enabled ? 'toggle_on' : 'toggle_off'}
+                  </span>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-slate-900 dark:text-white" style={{ color: '#0F172A' }}>
+                    {followUpConfig.enabled ? 'Sistema de follow-up ligado' : 'Sistema de follow-up desligado'}
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400" style={{ color: '#64748B' }}>
+                    {followUpConfig.enabled
+                      ? 'Mensagens automáticas e fechamento por inatividade estão ativos conforme os tempos abaixo.'
+                      : 'Nenhuma mensagem de follow-up é enviada e o fluxo automático de fechamento por follow-up não corre. Clique em Salvar para aplicar.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFollowUpConfig({ ...followUpConfig, enabled: !followUpConfig.enabled })}
+                disabled={isSaving || isLoading}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                  followUpConfig.enabled ? 'bg-primary' : 'bg-slate-300'
+                } ${isSaving || isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                style={{ backgroundColor: followUpConfig.enabled ? '#F07000' : '#CBD5E1' }}
+                aria-pressed={followUpConfig.enabled}
+                aria-label={followUpConfig.enabled ? 'Desligar follow-up' : 'Ligar follow-up'}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    followUpConfig.enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {!followUpConfig.enabled && (
+              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
+                <div className="flex items-start gap-2">
+                  <span className="material-icons-outlined text-amber-700 dark:text-amber-400 text-lg shrink-0">warning</span>
+                  <p className="text-sm text-amber-900 dark:text-amber-200">
+                    Com o follow-up desligado, o job de inatividade não envia o 1.º nem o 2.º follow-up nem move atendimentos para fechados por esse fluxo. As configurações abaixo permanecem guardadas para quando voltar a ligar.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Tempos */}
-            <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-4" style={{ backgroundColor: '#F8FAFC' }}>
+            <div
+              className={`bg-slate-50 dark:bg-slate-800 rounded-lg p-4 ${!followUpConfig.enabled ? 'opacity-60' : ''}`}
+              style={{ backgroundColor: '#F8FAFC' }}
+            >
               <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4" style={{ color: '#475569' }}>
                 Tempos (em minutos)
               </h4>

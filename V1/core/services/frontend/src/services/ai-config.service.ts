@@ -582,6 +582,8 @@ AIConfigService.prototype.updateSubdivisionInactivityTimeouts = async function(t
  * Follow-up configuration for inactive attendances
  */
 export interface FollowUpConfig {
+  /** Quando false, nenhum follow-up automático é enviado nem fechamento por esse fluxo. */
+  enabled: boolean;
   firstDelayMinutes: number;
   secondDelayMinutes: number;
   closeDelayMinutes: number;

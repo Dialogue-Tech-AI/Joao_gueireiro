@@ -507,6 +507,7 @@ export const SuperAdminDashboard: React.FC = () => {
 
   // Follow-up config states (tempos e mensagens de follow-up por inatividade)
   const [followUpConfig, setFollowUpConfig] = useState<FollowUpConfig>({
+    enabled: true,
     firstDelayMinutes: 60,
     secondDelayMinutes: 1440,
     closeDelayMinutes: 2160,
@@ -1318,7 +1319,10 @@ export const SuperAdminDashboard: React.FC = () => {
         setIsLoadingFollowUp(true);
         try {
           const config = await aiConfigService.getFollowUpConfig();
-          setFollowUpConfig(config);
+          setFollowUpConfig({
+            ...config,
+            enabled: config.enabled !== false,
+          });
         } catch (error: any) {
           console.error('Error loading follow-up config:', error);
           toast.error('Erro ao carregar configuração de follow-up');
@@ -1609,13 +1613,15 @@ export const SuperAdminDashboard: React.FC = () => {
   };
 
   const handleSaveFollowUpConfig = async () => {
-    if (!followUpConfig.firstMessage?.trim()) {
-      toast.error('A mensagem do 1º follow-up é obrigatória');
-      return;
-    }
-    if (!followUpConfig.secondMessage?.trim()) {
-      toast.error('A mensagem do 2º follow-up é obrigatória');
-      return;
+    if (followUpConfig.enabled) {
+      if (!followUpConfig.firstMessage?.trim()) {
+        toast.error('A mensagem do 1º follow-up é obrigatória');
+        return;
+      }
+      if (!followUpConfig.secondMessage?.trim()) {
+        toast.error('A mensagem do 2º follow-up é obrigatória');
+        return;
+      }
     }
     setIsSavingFollowUp(true);
     try {

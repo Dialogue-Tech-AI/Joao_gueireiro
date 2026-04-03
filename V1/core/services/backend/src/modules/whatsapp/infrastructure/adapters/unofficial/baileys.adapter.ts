@@ -1219,7 +1219,7 @@ export class BaileysAdapter implements IWhatsAppAdapter {
     }
   }
 
-  /** Ciclo contínuo enquanto conectado: a doc Baileys recomenda unavailable “de vez em quando” para o telefone receber notificações. */
+  /** Ciclo contínuo enquanto conectado (15s): doc Baileys — unavailable periódico favorece notificações no telefone ligado. */
   private startPhoneNotificationPresenceLoop(): void {
     this.stopPhoneNotificationPresenceLoop();
     if (!this.socket || !this.connected) return;

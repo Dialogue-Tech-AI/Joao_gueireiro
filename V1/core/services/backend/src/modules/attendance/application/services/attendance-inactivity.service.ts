@@ -24,8 +24,10 @@ const DEFAULT_TEMPO_INATIVIDADE_BALCAO_MIN = 30; // 30 minutos padrão
 export class AttendanceInactivityService {
   /**
    * Check and send follow-up messages for inactive attendances.
-   * - 1º follow-up: conforme config (inatividade após resposta AI/HUMANO)
-   * - 2º follow-up: após o intervalo configurado desde o 1º, se o cliente ainda não respondeu
+   * - 1º follow-up: conforme config (inatividade após resposta AI/HUMANO), exceto se o dono já respondeu
+   *   (SELLER — WhatsApp direto ou plataforma): nesse caso não envia o 1º; grava firstSentAt na última msg
+   *   do dono e só corre o 2º após secondDelayMinutes a partir dessa âncora.
+   * - 2º follow-up: após o intervalo configurado desde o 1º (ou desde a âncora acima), se o cliente ainda não respondeu
    * - Ao enviar o 2º follow-up: estado operacional → AGUARDANDO_CLIENTE (coluna “Aguardando” no supervisor)
    * - Fechamento automático: tempo configurado em movimentação (após 2º follow-up), contado desde secondSentAt
    */
@@ -35,6 +37,9 @@ export class AttendanceInactivityService {
       const messageRepo = AppDataSource.getRepository(Message);
 
       const followUpConfig = await aiConfigService.getFollowUpConfig();
+      if (!followUpConfig.enabled) {
+        return 0;
+      }
       const movementConfig = await aiConfigService.getFollowUpMovementConfig();
       const firstCutoff = new Date(Date.now() - followUpConfig.firstDelayMinutes * 60 * 1000);
 
@@ -54,6 +59,7 @@ export class AttendanceInactivityService {
 
       let followUpsSent = 0;
       let autoClosedCount = 0;
+      let followUpStateUpdated = false;
 
       for (const attendance of pendingAttendances) {
         const aiContext = (attendance.aiContext ?? {}) as Record<string, any>;
@@ -76,6 +82,7 @@ export class AttendanceInactivityService {
           lastClientMessageAt?: string;
           firstSentAt?: string;
           secondSentAt?: string;
+          firstFollowUpSkipped?: boolean;
         };
 
         // Precisa ter mensagem do cliente como base para contagem de inatividade.
@@ -128,8 +135,37 @@ export class AttendanceInactivityService {
           }
         }
 
-        // 1º follow-up: tempo configurado sem resposta do cliente (envio da mensagem)
+        // 1º follow-up: tempo configurado sem resposta do cliente (envio da mensagem).
+        // Se o dono já enviou mensagem (SELLER) após a última do cliente, não dispara o 1º automático:
+        // ancora firstSentAt na última msg SELLER para o 2º follow-up (secondDelay a partir daí).
         if (!normalizedState.firstSentAt && lastClientMessageAt < firstCutoff) {
+          const latestSellerAfterClient = await messageRepo.findOne({
+            where: {
+              attendanceId: attendance.id,
+              origin: MessageOrigin.SELLER,
+              sentAt: Not(LessThan(lastClientMessageAt)),
+            },
+            order: { sentAt: 'DESC' },
+          });
+
+          if (latestSellerAfterClient) {
+            attendance.aiContext = {
+              ...aiContext,
+              followUpState: {
+                ...normalizedState,
+                firstSentAt: latestSellerAfterClient.sentAt.toISOString(),
+                firstFollowUpSkipped: true,
+              },
+            };
+            await attendanceRepo.save(attendance);
+            followUpStateUpdated = true;
+            logger.info('Follow-up: 1º automático ignorado (resposta do dono); âncora para 2º', {
+              attendanceId: attendance.id,
+              anchorAt: latestSellerAfterClient.sentAt.toISOString(),
+            });
+            continue;
+          }
+
           const sent = await this.sendFollowUpMessage(
             attendance,
             1,
@@ -176,12 +212,13 @@ export class AttendanceInactivityService {
         }
       }
 
-      if (followUpsSent > 0 || autoClosedCount > 0) {
+      if (followUpsSent > 0 || autoClosedCount > 0 || followUpStateUpdated) {
         invalidateSubdivisionCountsCache();
         socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
         logger.info('Follow-up inactivity check completed', {
           followUpsSent,
           autoClosedCount,
+          followUpStateUpdated,
           totalChecked: pendingAttendances.length,
         });
       }

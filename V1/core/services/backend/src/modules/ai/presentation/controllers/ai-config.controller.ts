@@ -1519,6 +1519,7 @@ export class AIConfigController {
   private async updateFollowUpConfig(req: Request, res: Response): Promise<void> {
     try {
       const body = req.body as {
+        enabled?: boolean;
         firstDelayMinutes?: number;
         secondDelayMinutes?: number;
         closeDelayMinutes?: number;
@@ -1527,6 +1528,7 @@ export class AIConfigController {
       };
       const config = await aiConfigService.getFollowUpConfig();
       const updated = await aiConfigService.updateFollowUpConfig({
+        enabled: body.enabled !== undefined ? body.enabled : config.enabled,
         firstDelayMinutes: body.firstDelayMinutes ?? config.firstDelayMinutes,
         secondDelayMinutes: body.secondDelayMinutes ?? config.secondDelayMinutes,
         closeDelayMinutes: body.closeDelayMinutes ?? config.closeDelayMinutes,

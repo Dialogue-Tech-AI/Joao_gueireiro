@@ -959,6 +959,7 @@ Responda em português brasileiro de forma clara e objetiva.`;
    * Get follow-up configuration (times and messages for inactive attendances)
    */
   async getFollowUpConfig(): Promise<{
+    enabled: boolean;
     firstDelayMinutes: number;
     secondDelayMinutes: number;
     closeDelayMinutes: number;
@@ -971,6 +972,7 @@ Responda em português brasileiro de forma clara e objetiva.`;
       });
       if (!config || !config.value) {
         return {
+          enabled: true,
           firstDelayMinutes: 60,
           secondDelayMinutes: 1440,
           closeDelayMinutes: 2160,
@@ -980,6 +982,7 @@ Responda em português brasileiro de forma clara e objetiva.`;
       }
       const parsed = typeof config.value === 'string' ? JSON.parse(config.value) : config.value;
       return {
+        enabled: parsed.enabled !== false,
         firstDelayMinutes: Math.max(1, Math.min(1440, parsed.firstDelayMinutes ?? 60)),
         secondDelayMinutes: Math.max(1, Math.min(1440 * 7, parsed.secondDelayMinutes ?? 1440)),
         closeDelayMinutes: Math.max(60, Math.min(1440 * 30, parsed.closeDelayMinutes ?? 2160)),
@@ -989,6 +992,7 @@ Responda em português brasileiro de forma clara e objetiva.`;
     } catch (error: any) {
       logger.error('Error getting follow-up config', { error: error.message });
       return {
+        enabled: true,
         firstDelayMinutes: 60,
         secondDelayMinutes: 1440,
         closeDelayMinutes: 2160,
@@ -1002,6 +1006,7 @@ Responda em português brasileiro de forma clara e objetiva.`;
    * Update follow-up configuration
    */
   async updateFollowUpConfig(config: {
+    enabled: boolean;
     firstDelayMinutes: number;
     secondDelayMinutes: number;
     closeDelayMinutes: number;
@@ -1018,11 +1023,13 @@ Responda em português brasileiro de forma clara e objetiva.`;
       if (config.closeDelayMinutes < 60 || config.closeDelayMinutes > 1440 * 30) {
         throw new Error('Tempo até fechamento deve estar entre 60 e 43200 minutos (30 dias)');
       }
-      if (!config.firstMessage?.trim()) {
-        throw new Error('Mensagem do 1º follow-up é obrigatória');
-      }
-      if (!config.secondMessage?.trim()) {
-        throw new Error('Mensagem do 2º follow-up é obrigatória');
+      if (config.enabled !== false) {
+        if (!config.firstMessage?.trim()) {
+          throw new Error('Mensagem do 1º follow-up é obrigatória');
+        }
+        if (!config.secondMessage?.trim()) {
+          throw new Error('Mensagem do 2º follow-up é obrigatória');
+        }
       }
       let entity = await this.configRepository.findOne({
         where: { key: 'follow_up_config' },
